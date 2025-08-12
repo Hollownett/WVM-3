@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Virtual Monitor</title>
+  <link rel="stylesheet" href="./style.css" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self';">
+</head>
+<body>
+  <!-- Custom titlebar -->
+  <div class="titlebar" id="titlebar">
+    <div class="drag-region">
+      <div class="app-title">Virtual Monitor</div>
+      <div class="title-actions">
+        <button id="compactBtn" class="ghost" title="Toggle compact (hide controls)">▣</button>
+        <button id="minBtn" class="ghost" title="Minimize">—</button>
+        <button id="maxBtn" class="ghost" title="Maximize/Restore">▢</button>
+        <button id="closeBtn" class="danger" title="Close">✕</button>
+      </div>
+    </div>
+  </div>
+
+<section class="controls" id="controls">
+  <div class="row">
+    <div class="card">
+      <div class="card-title">Source</div>
+      <div class="field">
+        <button id="refresh" class="primary">Refresh windows</button>
+        <select id="sourceSelect"></select>
+      </div>
+      <div class="hint">Pick a window to start mirroring automatically.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        Audio Output
+        <button id="locateSVV" class="icon-btn" title="Locate SoundVolumeView.exe">📁</button>
+      </div>
+      <div class="field">
+        <button id="refreshAudio">Refresh devices</button>
+        <select id="deviceSelect"></select>
+        <select id="pidSelect"></select>
+      </div>
+      <div class="hint">Select output device & target PID. Routing applies automatically.</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card small">
+      <label class="switch">
+        <input type="checkbox" id="pin" />
+        <span>Always on top</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="clickThrough" />
+        <span>Click-through (Ctrl+Shift+I)</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="autoCompact" checked />
+        <span>Auto-compact while mirroring</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="applyStartup" />
+        <span>Apply on startup</span>
+      </label>
+    </div>
+
+    <div class="card small">
+      <div class="field">
+        <label for="opacity">Opacity</label>
+        <input id="opacity" type="range" min="0.3" max="1" step="0.05" value="1" />
+        <span id="opacityVal">100%</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<main id="stage">
+  <div id="viewport">
+    <video id="video" autoplay muted playsinline></video>
+  </div>
+</main>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>
