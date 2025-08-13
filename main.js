@@ -1,10 +1,12 @@
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, globalShortcut, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 function dbg(msg) { try { if (win) win.webContents.send('debug:log', `[Audio] ${msg}`); } catch {} }
 let win;
+// Track pids whose audio output was rerouted so we can restore defaults on exit
+const routedPids = new Set();
 
 // --- Persistent Click Worker (PowerShell) ---
 const CLICK_WORKER_NAME = 'click_worker.ps1';
@@ -570,6 +572,7 @@ app.whenReady().then(() => {
   registerHotkeys();
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
+app.on('will-quit', resetAudioRoutes);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
 // ---- KeepAlive scheduler (no focus stealing) ----
@@ -839,9 +842,26 @@ ipcMain.handle('route-audio', async (_evt, { pid, deviceId }) => {
   return new Promise((resolve) => {
     const args = ['/SetAppDefault', deviceId, 'all', String(pid)];
     const p = spawn(svv, args, { windowsHide: true });
-    p.on('close', code => resolve({ ok: code === 0, code }));
+    p.on('close', code => {
+      if (code === 0) {
+        if (deviceId && deviceId !== 'Default') routedPids.add(pid);
+        else routedPids.delete(pid);
+      }
+      resolve({ ok: code === 0, code });
+    });
   });
 });
+
+function resetAudioRoutes() {
+  if (!routedPids.size) return;
+  const svv = getSVVPath();
+  if (!svv) return;
+  for (const pid of routedPids) {
+    try {
+      spawnSync(svv, ['/SetAppDefault', 'Default', 'all', String(pid)], { windowsHide: true });
+    } catch {}
+  }
+}
 
 // Forward smart click (non-blocking PostMessage)
 ipcMain.handle('forward-click-smart', async (_evt, { hwnd, x, y }) => {
