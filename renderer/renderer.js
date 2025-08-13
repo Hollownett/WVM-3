@@ -73,13 +73,6 @@ async function stopKeepAlive() {
 }
 
 
-async function stopKeepAlive() {
-  if (!keepAliveFor) return;
-  try { await window.api.keepAliveSet({ hwnd: keepAliveFor, enable: false }); } catch {}
-  keepAliveFor = null;
-}
-
-
 // ============ Utils ============
 
 function dbg(msg) {
@@ -585,7 +578,8 @@ document.getElementById('saveProfile')?.addEventListener('click', () => {
     id, name,
     sourceId: sourceSelect.value || '',
     windowTitle: state.windowTitle || '',
-    audioDeviceId: deviceSelect.value || ''
+    audioDeviceId: deviceSelect.value || '',
+    audioDeviceName: deviceSelect.options[deviceSelect.selectedIndex]?.text || ''
   };
   const list = loadProfiles();
   list.push(profile);
