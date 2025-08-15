@@ -170,7 +170,7 @@ if (window.api?.onToggleCompact)
 
   await refreshSources();
   await refreshAudioDevices();
-  await refreshProfiles();
+  if (profilesSelect) await refreshProfiles();
 
   // Auto compact when active (manual toggle still works)
   updateActiveUI(false);
@@ -562,6 +562,7 @@ function loadProfiles() {
 function saveProfiles(arr) { localStorage.setItem('vm_profiles', JSON.stringify(arr)); }
 
 async function refreshProfiles() {
+  if (!profilesSelect) return;
   const list = loadProfiles();
   profilesSelect.innerHTML = '';
   if (!list.length) {
