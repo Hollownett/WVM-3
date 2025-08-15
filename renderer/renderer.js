@@ -548,10 +548,11 @@ viewport.addEventListener('wheel', async (e) => {
   if (!r) return;
   e.preventDefault();
 
+  await recalcMap();
   const { cx, cy } = mapPoint(e, r);
-  const delta = Math.max(-120, Math.min(120, (e.deltaY < 0 ? 120 : -120)));
+  const delta = Math.max(-120, Math.min(120, -e.deltaY));
   await window.api.mouseWheel({ hwnd: state.hwnd, x: cx, y: cy, delta, horiz:false });
-});
+}, { passive: false });
 
 // ============ Profiles (localStorage, lightweight) ============
 

@@ -249,8 +249,9 @@ function Handle-Wheel($req) {
   $WM_MOUSEHWHEEL = 0x020E
   $msg = if ($horiz) { $WM_MOUSEHWHEEL } else { $WM_MOUSEWHEEL }
 
-  $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
-  [void][U]::PostMessage($info.child, $msg, [IntPtr]([int]$wParam), [IntPtr]([int]$lParam))
+  # Send wheel to top-level window to ensure scrolling even when the
+  # child under the cursor does not process WM_MOUSEWHEEL.
+  [void][U]::PostMessage($hwnd, $msg, [IntPtr]([int]$wParam), [IntPtr]([int]$lParam))
   @{ id=$req.id; ok=$true }
 }
 
