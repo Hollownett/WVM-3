@@ -213,6 +213,9 @@ async function refreshSources() {
     const opt = document.createElement('option');
     opt.textContent = 'No windows found';
     sourceSelect.appendChild(opt);
+  } else {
+    // Force user interaction so the first click triggers a change event
+    sourceSelect.selectedIndex = -1;
   }
 }
 

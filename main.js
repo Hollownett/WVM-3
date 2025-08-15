@@ -6,6 +6,22 @@ const os = require('os');
 function dbg(msg) { try { if (win) win.webContents.send('debug:log', `[Audio] ${msg}`); } catch {} }
 let win;
 
+// Ensure a single running instance and proper AppUserModelID on Windows
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+}
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.yourco.virtualmonitor');
+}
+
 // --- Persistent Click Worker (PowerShell) ---
 const CLICK_WORKER_NAME = 'click_worker.ps1';
 let clickWorker = null;
@@ -572,6 +588,9 @@ app.whenReady().then(() => {
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
 
 // ---- KeepAlive scheduler (no focus stealing) ----
 const keepAliveTimers = new Map();
