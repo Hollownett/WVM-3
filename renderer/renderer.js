@@ -98,15 +98,40 @@ if (dbgCopyBtn)  dbgCopyBtn.onclick  = async () => {
   alert('Debug log copied');
 };
 
-if (window.api?.onDebugLog) {
-  window.api.onDebugLog((msg) => {
-    const time = new Date().toLocaleTimeString();
-    if (debugLogEl) {
-      debugLogEl.textContent += `[${time}] ${msg}\n`;
-      debugLogEl.scrollTop = debugLogEl.scrollHeight;
-    }
-  });
+let offDebugLog, offClickThroughUpdated, offToggleCompact;
+
+function bindIpcEvents() {
+  // remove old listeners if re-binding
+  offDebugLog?.();
+  offClickThroughUpdated?.();
+  offToggleCompact?.();
+
+  if (window.api?.onDebugLog) {
+    offDebugLog = window.api.onDebugLog((msg) => {
+      const time = new Date().toLocaleTimeString();
+      if (debugLogEl) {
+        debugLogEl.textContent += `[${time}] ${msg}\n`;
+        debugLogEl.scrollTop = debugLogEl.scrollHeight;
+      }
+    });
+  }
+
+  if (window.api?.onClickThroughUpdated)
+    offClickThroughUpdated = window.api.onClickThroughUpdated(v => { if (clickThrough) clickThrough.checked = !!v; });
+
+  if (window.api?.onToggleCompact)
+    offToggleCompact = window.api.onToggleCompact(() => document.body.classList.toggle('compact'));
 }
+
+function unbindIpcEvents() {
+  offDebugLog?.();
+  offClickThroughUpdated?.();
+  offToggleCompact?.();
+  offDebugLog = offClickThroughUpdated = offToggleCompact = null;
+}
+
+bindIpcEvents();
+window.addEventListener('beforeunload', unbindIpcEvents);
 
 // tiny pointer shadow to visualize mapping
 const cursorShadow = document.createElement('div');
@@ -145,11 +170,7 @@ if (opacityRange) {
   });
 }
 
-if (window.api?.onClickThroughUpdated)
-  window.api.onClickThroughUpdated(v => { if (clickThrough) clickThrough.checked = !!v; });
-
-if (window.api?.onToggleCompact)
-  window.api.onToggleCompact(() => document.body.classList.toggle('compact'));
+// bindings may be re-initialized if needed by calling bindIpcEvents again
 
 // ============ Init ============
 

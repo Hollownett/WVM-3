@@ -271,6 +271,28 @@ function Handle-Wheel($req) {
   @{ id=$req.id; ok=$true }
 }
 
+function Handle-Drag($req) {
+  $hwnd = [IntPtr]([int64]$req.hwnd)
+  if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+
+  $sx = [int]$req.sx; $sy = [int]$req.sy
+  $ex = [int]$req.ex; $ey = [int]$req.ey
+
+  $start = Resolve-ChildPoint -hwnd $hwnd -cx $sx -cy $sy
+  $end   = Resolve-ChildPoint -hwnd $hwnd -cx $ex -cy $ey
+
+  $WM_MOUSEMOVE   = 0x0200
+  $WM_LBUTTONDOWN = 0x0201
+  $WM_LBUTTONUP   = 0x0202
+  $MK_LBUTTON     = 1
+
+  [void][U]::PostMessage($start.child, $WM_LBUTTONDOWN, [IntPtr]$MK_LBUTTON, [IntPtr]([int]$start.lParam))
+  [void][U]::PostMessage($start.child, $WM_MOUSEMOVE, [IntPtr]$MK_LBUTTON, [IntPtr]([int]$end.lParam))
+  [void][U]::PostMessage($start.child, $WM_LBUTTONUP, [IntPtr]::Zero, [IntPtr]([int]$end.lParam))
+
+  @{ id=$req.id; ok=$true }
+}
+
 # NEW: Keepalive — restore if minimized, push to bottom, send benign mousemove
 function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
@@ -512,7 +534,7 @@ function getSVVPath() {
     settings.svvPath,
     process.env.SOUNDVOLUMEVIEW_PATH,
     path.join(process.resourcesPath || __dirname, 'SoundVolumeView.exe'),
-    path.join(__dirname, 'SoundVolumeView.exe'),
+    path.join(__dirname, 'bin', 'SoundVolumeView.exe'),
   ].filter(Boolean);
   for (const g of guesses) { try { if (fs.existsSync(g)) return g; } catch {} }
   return null;
@@ -610,8 +632,16 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
   return true;
 });
 
-app.on('will-quit', () => { for (const t of keepAliveTimers.values()) clearInterval(t); keepAliveTimers.clear(); });
-
+app.on('will-quit', () => {
+  for (const t of keepAliveTimers.values()) clearInterval(t);
+  keepAliveTimers.clear();
+  if (workerProc) {
+    try { workerProc.kill(); } catch {}
+    for (const [, v] of pending) { clearTimeout(v.t); v.reject(new Error('app quit')); }
+    pending.clear();
+    workerProc = null;
+  }
+});
 
 
 // LOGS
@@ -697,58 +727,6 @@ ipcMain.handle('pick-svv', async () => {
   return p;
 });
 
-// ipcMain.handle('list-audio-devices', async () => {
-//   const svv = getSVVPath();
-//   if (!svv) return { error: 'SoundVolumeView.exe not found. Click the folder icon to locate it.' };
-
-//   // write to temp file (SVV cannot write JSON to stdout)
-//   const tmp = path.join(os.tmpdir(), `svv_${Date.now()}.json`);
-//   const { spawn } = require('child_process');
-//   return new Promise((resolve) => {
-//     const args = ['/sjson', tmp];
-//     const proc = spawn(svv, args, { windowsHide: true });
-//     proc.on('close', () => {
-//       try {
-//         const raw = fs.readFileSync(tmp, 'utf8');
-//         fs.unlink(tmp, () => {});
-//         const json = JSON.parse(raw || '[]');
-
-//         // Be tolerant to column names across versions
-//         const devices = [];
-//         for (const x of json) {
-//           const type = (x.Type || x['Item Type'] || '').toString().toLowerCase();
-//           const dir  = (x.Direction || '').toString().toLowerCase();
-//           const state = (x['Device State'] || '').toString().toLowerCase();
-//           const isDevice = type.includes('device');
-//           const isRender = dir.includes('render') || dir.includes('playback') || dir.includes('output');
-//           const isActive = !state || state.includes('active');
-
-//           if (isDevice && isRender && isActive) {
-//             devices.push({
-//               name: x.Name || x['Device Name'] || x['Device Friendly Name'] || 'Unknown device',
-//               id:  x['Command-Line Friendly ID'] || x['Command Line Friendly ID'] || x['Device ID'] || ''
-//             });
-//           }
-//         }
-//         resolve({ devices });
-//       } catch (e) {
-//         resolve({ error: 'Failed to read/parse SoundVolumeView JSON file.', details: String(e) });
-//       }
-//     });
-//   });
-// });
-
-// ipcMain.handle('route-audio', async (_evt, { pid, deviceId }) => {
-//   const svv = getSVVPath();
-//   if (!svv) return { ok: false, error: 'SoundVolumeView.exe not found.' };
-//   const { spawn } = require('child_process');
-//   return new Promise((resolve) => {
-//     // Route all roles (console/multimedia/communications)
-//     const args = ['/SetAppDefault', deviceId, 'all', String(pid)];
-//     const p = spawn(svv, args, { windowsHide: true });
-//     p.on('close', code => resolve({ ok: code === 0, code }));
-//   });
-// });
 
 ipcMain.handle('list-audio-devices', async () => {
   const svv = getSVVPath();
