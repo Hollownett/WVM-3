@@ -1,10 +1,11 @@
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, globalShortcut, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 function dbg(msg) { try { if (win) win.webContents.send('debug:log', `[Audio] ${msg}`); } catch {} }
 let win;
+let lastRoutedAudioPid = null;
 
 // Ensure a single running instance and proper AppUserModelID on Windows
 const gotLock = app.requestSingleInstanceLock();
@@ -633,6 +634,13 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
 });
 
 app.on('will-quit', () => {
+  if (lastRoutedAudioPid) {
+    const svv = getSVVPath();
+    if (svv) {
+      try { spawnSync(svv, ['/SetAppDefault', 'Default', 'all', String(lastRoutedAudioPid)], { windowsHide: true }); } catch {}
+    }
+    lastRoutedAudioPid = null;
+  }
   for (const t of keepAliveTimers.values()) clearInterval(t);
   keepAliveTimers.clear();
   if (workerProc) {
@@ -834,6 +842,7 @@ ipcMain.handle('list-audio-devices', async () => {
 ipcMain.handle('route-audio', async (_evt, { pid, deviceId }) => {
   const svv = getSVVPath();
   if (!svv) return { ok: false, error: 'SoundVolumeView.exe not found.' };
+  lastRoutedAudioPid = pid;
   return new Promise((resolve) => {
     const args = ['/SetAppDefault', deviceId, 'all', String(pid)];
     const p = spawn(svv, args, { windowsHide: true });
