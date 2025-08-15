@@ -512,7 +512,7 @@ function getSVVPath() {
     settings.svvPath,
     process.env.SOUNDVOLUMEVIEW_PATH,
     path.join(process.resourcesPath || __dirname, 'SoundVolumeView.exe'),
-    path.join(__dirname, 'SoundVolumeView.exe'),
+    path.join(__dirname, 'bin', 'SoundVolumeView.exe'),
   ].filter(Boolean);
   for (const g of guesses) { try { if (fs.existsSync(g)) return g; } catch {} }
   return null;
