@@ -565,13 +565,26 @@ function createWindow () {
 
   win.setAlwaysOnTop(win.isAlwaysOnTop(), 'screen-saver');
   if (typeof settings.opacity === 'number') win.setOpacity(settings.opacity);
-  // Prevent our overlay window from being captured when it covers other apps
-  // so that the underlying window can still be mirrored even if occluded.
-  // Uses SetWindowDisplayAffinity with WDA_EXCLUDEFROMCAPTURE on supported
-  // versions of Windows via Electron's setContentProtection.
-  try {
-    win.setContentProtection(true);
-  } catch {}
+  // Exclude our overlay from screen capture so the window being mirrored
+  // is still visible even when covered by this BrowserWindow. Electron's
+  // setContentProtection API uses WDA_MONITOR which blacks out content, so
+  // call SetWindowDisplayAffinity with WDA_EXCLUDEFROMCAPTURE directly.
+  if (process.platform === 'win32') {
+    try {
+      const hwnd = win.getNativeWindowHandle().readInt32LE(0);
+      const ps = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class U {
+  [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+}
+"@
+[U]::SetWindowDisplayAffinity([IntPtr]${hwnd}, 0x00000011) | Out-Null
+`;
+      spawn('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
+    } catch {}
+  }
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
