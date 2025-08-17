@@ -571,7 +571,11 @@ function createWindow () {
   // call SetWindowDisplayAffinity with WDA_EXCLUDEFROMCAPTURE directly.
   if (process.platform === 'win32') {
     try {
-      const hwnd = win.getNativeWindowHandle().readInt32LE(0);
+      const hwndBuf = win.getNativeWindowHandle();
+      const hwndBig = (process.arch === 'x64' || process.arch === 'arm64')
+        ? hwndBuf.readBigUInt64LE(0)
+        : BigInt(hwndBuf.readUInt32LE(0));
+      const hwndLiteral = `0x${hwndBig.toString(16)}`;
       const ps = `
 Add-Type @"
 using System;
@@ -580,7 +584,7 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
 }
 "@
-[U]::SetWindowDisplayAffinity([IntPtr]${hwnd}, 0x00000011) | Out-Null
+[U]::SetWindowDisplayAffinity([IntPtr]${hwndLiteral}, 0x00000011) | Out-Null
 `;
       spawn('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
     } catch {}
