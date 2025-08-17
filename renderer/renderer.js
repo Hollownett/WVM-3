@@ -104,7 +104,7 @@ const closeBtn = document.getElementById('closeBtn');
 if (closeBtn) closeBtn.onclick = () => window.api.winClose();
 if (compactBtn) compactBtn.onclick = () => {
   document.body.classList.toggle('compact');
-  sendEmbedBounds();
+  scheduleEmbedBounds();
 };
 
 if (pin) pin.addEventListener('change', e => window.api.setAlwaysOnTop(e.target.checked));
@@ -152,12 +152,21 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 });
 
 let embedObserver = null;
-let resizeRaf = null;
+let boundsRaf = null;
 
-function sendEmbedBounds() {
+function scheduleEmbedBounds() {
   if (!viewport || !state.hwnd) return;
-  const r = viewport.getBoundingClientRect();
-  window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+  if (boundsRaf) cancelAnimationFrame(boundsRaf);
+  boundsRaf = requestAnimationFrame(() => {
+    boundsRaf = null;
+    const r = viewport.getBoundingClientRect();
+    window.api.setEmbeddedBounds({
+      x: Math.round(r.left),
+      y: Math.round(r.top),
+      width: Math.round(r.width),
+      height: Math.round(r.height)
+    });
+  });
 }
 
 if (embedBtn) embedBtn.addEventListener('click', async () => {
@@ -172,16 +181,10 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   await window.api.embedWindow(hwnd, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
   await window.api.keepAliveSet({ hwnd, enable: true });
   embedObserver?.disconnect();
-  sendEmbedBounds();
-  embedObserver = new ResizeObserver(() => {
-    if (resizeRaf) cancelAnimationFrame(resizeRaf);
-    resizeRaf = requestAnimationFrame(() => {
-      resizeRaf = null;
-      sendEmbedBounds();
-    });
-  });
+  scheduleEmbedBounds();
+  embedObserver = new ResizeObserver(() => scheduleEmbedBounds());
   embedObserver.observe(viewport);
-  window.addEventListener('resize', sendEmbedBounds);
+  window.addEventListener('resize', scheduleEmbedBounds);
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
