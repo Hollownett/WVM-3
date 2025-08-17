@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, globalShortcut, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -79,8 +79,10 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool  ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool  SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-}
-"@
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool  SetForegroundWindow(IntPtr hWnd);
+  }
+  "@
 
 [void][U]::SetProcessDPIAware()
 
@@ -293,6 +295,18 @@ function Handle-Drag($req) {
   @{ id=$req.id; ok=$true }
 }
 
+# Resize/move embedded child window and refocus
+function Handle-SetPos($req) {
+  $hwnd = [IntPtr]([int64]$req.hwnd)
+  if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
+  $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
+  [void][U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED))
+  [void][U]::SetForegroundWindow($hwnd)
+  [void][U]::SetFocus($hwnd)
+  @{ id=$req.id; ok=$true }
+}
+
 # NEW: Keepalive — restore if minimized, push to bottom, send benign mousemove
 function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
@@ -344,6 +358,7 @@ while ($true) {
       'dblclick'  { Handle-DblClick $req }
       'wheel'     { Handle-Wheel $req }
       'drag'      { Handle-Drag $req }
+      'setpos'    { Handle-SetPos $req }
       'keepalive' { Handle-KeepAlive $req }   # <— NEW
       default     { @{ id=$req.id; ok=$false; err='unknown op' } }
     }
@@ -566,10 +581,34 @@ function createWindow () {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   win.on('close', () => {
+    if (embeddedHwnd && embeddedInfo) {
+      const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+$GWL_STYLE = -16; $GWL_EXSTYLE = -20;
+[U]::SetParent($child, [IntPtr]${embeddedInfo.parent}) | Out-Null;
+[U]::SetWindowLong($child, $GWL_STYLE, ${embeddedInfo.style}) | Out-Null;
+[U]::SetWindowLong($child, $GWL_EXSTYLE, ${embeddedInfo.ex}) | Out-Null;
+$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
+[U]::SetWindowPos($child, [IntPtr]0, ${embeddedInfo.x}, ${embeddedInfo.y}, ${embeddedInfo.w}, ${embeddedInfo.h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
+`;
+      try { spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true }); } catch {}
+      embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
+    }
     settings.bounds = win.getBounds();
     settings.alwaysOnTop = win.isAlwaysOnTop();
     saveSettings();
   });
+
+  win.on('resize', () => applyLastBounds());
+  win.on('move', () => applyLastBounds());
+  win.on('restore', () => applyLastBounds());
+  win.on('maximize', () => applyLastBounds());
+  win.on('unmaximize', () => applyLastBounds());
+  win.on('enter-full-screen', () => applyLastBounds());
+  win.on('leave-full-screen', () => applyLastBounds());
+  win.on('enter-html-full-screen', () => applyLastBounds());
+  win.on('leave-html-full-screen', () => applyLastBounds());
 }
 
 // global hotkey to toggle click-through
@@ -1068,6 +1107,83 @@ list.ForEach(s => Console.WriteLine(s));
       resolve(rows);
     });
   });
+});
+
+// ----------------- IPC: Reparent external window into our container -----------------
+let embeddedHwnd = null;
+let embeddedInfo = null; // original parent & styles
+let lastEmbedBounds = null;
+let pendingSetPos = false;
+let setPosAgain = false;
+
+function applyLastBounds() {
+  if (!embeddedHwnd || !lastEmbedBounds) return;
+  if (pendingSetPos) { setPosAgain = true; return; }
+  pendingSetPos = true;
+  const { x, y, width: w, height: h } = lastEmbedBounds;
+  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h })
+    .then(() => workerCall('keepalive', { hwnd: embeddedHwnd }).catch(() => {}))
+    .catch(() => {})
+    .finally(() => {
+      pendingSetPos = false;
+      if (setPosAgain) {
+        setPosAgain = false;
+        applyLastBounds();
+      }
+    });
+}
+
+ipcMain.handle('embed-window', async (_evt, payload) => {
+  const { hwnd: childHwnd, bounds } = payload || {};
+  if (!win || !childHwnd) return false;
+  const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+  const x = Math.round(bounds?.x ?? 0);
+  const y = Math.round(bounds?.y ?? 0);
+  const w = Math.round(bounds?.width ?? 0);
+  const h = Math.round(bounds?.height ?? 0);
+  const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic struct RECT { public int Left, Top, Right, Bottom; }\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);\n}\n"@;
+$child = [IntPtr]${childHwnd};
+$parent = [IntPtr]${parentHwnd};
+$GWL_STYLE = -16; $GWL_EXSTYLE = -20;
+$WS_CHILD = 0x40000000; $WS_POPUP = 0x80000000; $WS_CAPTION = 0x00C00000; $WS_THICKFRAME = 0x00040000; $WS_EX_TOPMOST = 0x00000008;
+$origStyle = [U]::GetWindowLong($child, $GWL_STYLE);
+$origEx = [U]::GetWindowLong($child, $GWL_EXSTYLE);
+$wr = New-Object RECT; [void][U]::GetWindowRect($child, [ref]$wr);
+$s = $origStyle -band (-bnot $WS_POPUP);
+$s = $s -band (-bnot ($WS_CAPTION -bor $WS_THICKFRAME));
+$s = $s -bor $WS_CHILD;
+[U]::SetWindowLong($child, $GWL_STYLE, $s) | Out-Null;
+$ex = $origEx -band (-bnot $WS_EX_TOPMOST);
+[U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
+$oldParent = [U]::SetParent($child, $parent);
+$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_ASYNCWINDOWPOS = 0x4000;
+[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
+$info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx; x = $wr.Left; y = $wr.Top; w = ($wr.Right - $wr.Left); h = ($wr.Bottom - $wr.Top) };
+$info | ConvertTo-Json -Compress;
+`;
+  embeddedHwnd = childHwnd;
+  lastEmbedBounds = { x, y, width: w, height: h };
+  return new Promise((resolve) => {
+    const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
+    let buf = '';
+    p.stdout.on('data', d => { buf += d.toString(); });
+    p.on('close', () => {
+      try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
+      resolve(true);
+    });
+  });
+});
+
+ipcMain.on('embed-window-bounds', (_evt, b) => {
+  if (!embeddedHwnd) return;
+  lastEmbedBounds = {
+    x: Math.round(b?.x ?? 0),
+    y: Math.round(b?.y ?? 0),
+    width: Math.round(b?.width ?? 0),
+    height: Math.round(b?.height ?? 0)
+  };
+  applyLastBounds();
 });
 
 // ipcMain.handle('force-topmost', async () => {
