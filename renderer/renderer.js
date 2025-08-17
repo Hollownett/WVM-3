@@ -157,7 +157,13 @@ let resizeRaf = null;
 function sendEmbedBounds() {
   if (!viewport || !state.hwnd) return;
   const r = viewport.getBoundingClientRect();
-  window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+  const dpr = window.devicePixelRatio || 1;
+  window.api.setEmbeddedBounds({
+    x: Math.round(r.left * dpr),
+    y: Math.round(r.top * dpr),
+    width: Math.round(r.width * dpr),
+    height: Math.round(r.height * dpr)
+  });
 }
 
 if (embedBtn) embedBtn.addEventListener('click', async () => {
@@ -169,7 +175,13 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   state.hwnd = hwnd;
   state.windowTitle = title;
   const rect = viewport.getBoundingClientRect();
-  await window.api.embedWindow(hwnd, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
+  const dpr = window.devicePixelRatio || 1;
+  await window.api.embedWindow(hwnd, {
+    x: Math.round(rect.left * dpr),
+    y: Math.round(rect.top * dpr),
+    width: Math.round(rect.width * dpr),
+    height: Math.round(rect.height * dpr)
+  });
   await window.api.keepAliveSet({ hwnd, enable: true });
   embedObserver?.disconnect();
   sendEmbedBounds();
