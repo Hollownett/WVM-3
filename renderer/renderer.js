@@ -1,6 +1,5 @@
 // ============ DOM ============
 
-const video         = document.getElementById('video');
 const viewport      = document.getElementById('viewport');
 
 const sourceSelect  = document.getElementById('sourceSelect');
@@ -19,12 +18,10 @@ const refreshBtn    = document.getElementById('refresh');
 const refreshAudioBtn= document.getElementById('refreshAudio');
 const locateSVVBtn  = document.getElementById('locateSVV');
 const embedBtn      = document.getElementById('embed');
-const mirrorBtn     = document.getElementById('mirror');
 const routeBtn      = document.getElementById('route');
 const fixCaptureBtn = document.getElementById('fixCapture');
 const compactBtn    = document.getElementById('compactBtn');
 
-const useSendInput  = document.getElementById('useSendInput'); // optional toggle
 
 // debug (kept but non-intrusive)
 const debugArea     = document.getElementById('debugArea');
@@ -34,51 +31,12 @@ const dbgCopyBtn    = document.getElementById('dbgCopy');
 
 // ============ State ============
 
-let stream = null;
-let capW = 0, capH = 0; // decoded frame size
-
 const state = {
   hwnd: null,
   pid: null,
   windowTitle: '',
-  audioDeviceId: null,
-  active: false
+  audioDeviceId: null
 };
-
-const map = {
-  scaleX: 1, scaleY: 1,
-  invScaleX: 1, invScaleY: 1,
-  offX: 0, offY: 0,
-  clientW: 0, clientH: 0,
-  winW: 0, winH: 0,
-  mode: 'auto'
-};
-
-let lastMoveTs = 0;
-let clickTimer = null;
-let down = null;
-
-const MOVE_THROTTLE_MS = 12;
-const DRAG_PX = 4;
-const CLICK_DELAY_MS = 260; // leave room for dblclick event
-
-let keepAliveFor = null;
-async function startKeepAlive(hwnd) {
-  keepAliveFor = hwnd;
-  try { await window.api.keepAliveSet({ hwnd, enable: true, periodMs: 3000, x: 6, y: 6,  stickBottom: false }); } catch {}
-}
-async function stopKeepAlive() {
-  if (!keepAliveFor) return;
-  try { await window.api.keepAliveSet({ hwnd: keepAliveFor, enable: false }); } catch {}
-  keepAliveFor = null;
-}
-
-
-async function stopKeepAlive() {
-  if (!keepAliveFor) return;
-  try { await window.api.keepAliveSet({ hwnd: keepAliveFor, enable: false }); } catch {}
-  keepAliveFor = null;
-}
 
 
 // ============ Utils ============
@@ -135,21 +93,6 @@ bindIpcEvents();
 window.addEventListener('beforeunload', unbindIpcEvents);
 
 // tiny pointer shadow to visualize mapping
-const cursorShadow = document.createElement('div');
-cursorShadow.style.cssText = `
-  position:absolute; width:10px; height:10px; border-radius:50%;
-  border:2px solid rgba(255,255,255,.85); box-shadow:0 0 10px rgba(0,0,0,.6);
-  pointer-events:none; transform:translate(-50%,-50%); opacity:0; transition:opacity .08s;
-  z-index: 3;
-`;
-viewport?.appendChild(cursorShadow);
-
-function showShadow(x, y) {
-  cursorShadow.style.left = `${x}px`;
-  cursorShadow.style.top  = `${y}px`;
-  cursorShadow.style.opacity = '1';
-}
-function hideShadow() { cursorShadow.style.opacity = '0'; }
 
 // ============ Window chrome / toggles ============
 
@@ -194,8 +137,6 @@ if (opacityRange) {
   await refreshAudioDevices();
   if (profilesSelect) await refreshProfiles();
 
-  // Auto compact when active (manual toggle still works)
-  updateActiveUI(false);
 })();
 
 // ============ UI actions (auto-first) ============
@@ -213,10 +154,12 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   const id = sourceSelect?.value || '';
   const parts = id.split(':');
   const hwnd = Number(parts[1]);
+  const title = sourceSelect.options[sourceSelect.selectedIndex]?.text || '';
   if (!hwnd || !viewport) return;
+  state.hwnd = hwnd;
+  state.windowTitle = title;
   const rect = viewport.getBoundingClientRect();
   await window.api.embedWindow(hwnd, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
-  if (video) video.style.display = 'none';
   embedObserver?.disconnect();
   const sendBounds = () => {
     const r = viewport.getBoundingClientRect();
@@ -233,10 +176,7 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   window.addEventListener('resize', sendBounds);
 });
 
-if (mirrorBtn) mirrorBtn.addEventListener('click', () => autoMirrorFromSelection());
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
-
-if (sourceSelect) sourceSelect.addEventListener('change', () => autoMirrorFromSelection());
 if (deviceSelect) deviceSelect.addEventListener('change', () => attemptAutoRoute());
 if (pidSelect)    pidSelect.addEventListener('change', () => attemptAutoRoute());
 
@@ -316,295 +256,6 @@ async function attemptAutoRoute() {
   else dbg(`Audio routed pid=${pid}`);
 }
 
-// ============ Mirroring ============
-
-async function autoMirrorFromSelection() {
-  const id = sourceSelect.value;
-  if (!id) return;
-  await startMirror(id);
-}
-
-function parseHwndFromChromeId(id) {
-  const m = /^window:(\d+):/.exec(id || '');
-  return m ? Number(m[1]) : null;
-}
-
-async function startMirror(sourceId) {
-  try {
-    // stop previous
-    if (stream) { stream.getTracks().forEach(t => t.stop?.()); stream = null; }
-    await stopKeepAlive();
-
-    // start capture
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId } }
-    });
-    video.srcObject = stream;
-
-    await new Promise(res => (video.readyState >= 1 ? res() : (video.onloadedmetadata = () => res())));
-    try { await video.play(); } catch {}
-
-    capW = video.videoWidth  || stream.getVideoTracks()[0]?.getSettings?.().width  || 1920;
-    capH = video.videoHeight || stream.getVideoTracks()[0]?.getSettings?.().height || 1080;
-
-    state.hwnd = parseHwndFromChromeId(sourceId);
-    const title = sourceSelect.options[sourceSelect.selectedIndex]?.text || '';
-    state.windowTitle = title;
-
-    dbg(`[HWND] from chromeMediaSourceId -> ${state.hwnd}`);
-
-    // pid candidates by title
-    const candidates = await window.api.findPidsByTitle(title);
-    fillPidSelect(candidates);
-    state.pid = candidates[0]?.pid ?? null;
-
-    // compute mapping
-    await recalcMap(true);
-
-    dbg(`Mirror started: ${capW}x${capH} hwnd=${state.hwnd} pid=${state.pid} title="${title}"`);
-    updateActiveUI(true);
-    // ensure audio routing & KEEPALIVE
-    attemptAutoRoute();
-    startKeepAlive(state.hwnd);
-  } catch (e) {
-    dbg(`startMirror error: ${e.message}`);
-  }
-}
-
-function updateActiveUI(isActive) {
-  state.active = !!isActive;
-  document.body.classList.toggle('compact', state.active); // auto-compact when active
-}
-
-// ============ Mapping ============
-
-function getDisplayedVideoRect() {
-  // Trust the browser's layout instead of re-implementing object-fit math.
-  const r = video.getBoundingClientRect();
-  return { x: r.left, y: r.top, w: r.width, h: r.height };
-}
-
-function chooseBestMode(g) {
-  const capR = (capW || 16) / (capH || 9);
-  const winR = Math.max(1, g.win.w)    / Math.max(1, g.win.h);
-  const cliR = Math.max(1, g.client.w) / Math.max(1, g.client.h);
-
-  const errWin = Math.abs(Math.log(capR / winR));
-  const errCli = Math.abs(Math.log(capR / cliR));
-
-  const offX = Math.max(0, g.client.offX || 0);
-  const offY = Math.max(0, g.client.offY || 0);
-  const hasFrame = (offX >= 4) || (offY >= 16);
-
-  if (hasFrame && errCli <= errWin * 1.2) return 'client';
-  if (Math.abs(errCli - errWin) <= (Math.max(errCli, errWin) * 0.05)) return 'client';
-  return (errCli < errWin) ? 'client' : 'win';
-}
-
-
-function applyMapFromGeometry(g, firstRun=false) {
-  const mode = chooseBestMode(g);
-  if (mode === 'win') {
-    map.scaleX = capW / Math.max(1, g.win.w);
-    map.scaleY = capH / Math.max(1, g.win.h);
-    map.invScaleX = 1 / map.scaleX;
-    map.invScaleY = 1 / map.scaleY;
-    map.offX = g.client.offX || 0;
-    map.offY = g.client.offY || 0;
-    map.clientW = g.client.w || capW;
-    map.clientH = g.client.h || capH;
-    map.winW = g.win.w || capW;
-    map.winH = g.win.h || capH;
-    map.mode = 'win';
-  } else {
-    map.scaleX = capW / Math.max(1, g.client.w);
-    map.scaleY = capH / Math.max(1, g.client.h);
-    map.invScaleX = 1 / map.scaleX;
-    map.invScaleY = 1 / map.scaleY;
-    map.offX = 0;
-    map.offY = 0;
-    map.clientW = g.client.w || capW;
-    map.clientH = g.client.h || capH;
-    map.winW = g.win.w || capW;
-    map.winH = g.win.h || capH;
-    map.mode = 'client';
-  }
-
-  if (firstRun) {
-    dbg(`[Map] mode=${map.mode} cap=${capW}x${capH} win=${map.winW}x${map.winH} client=${map.clientW}x${map.clientH}`);
-    dbg(`[Map] scaleX=${map.scaleX.toFixed(6)} scaleY=${map.scaleY.toFixed(6)} off(${map.offX},${map.offY})`);
-  } else {
-    dbg(`[Map] (recalc) mode=${map.mode} scale=(${map.scaleX.toFixed(6)},${map.scaleY.toFixed(6)}) off(${map.offX},${map.offY}) client=${map.clientW}x${map.clientH}`);
-  }
-}
-
-async function recalcMap(firstRun=false) {
-  if (!state.hwnd || !capW || !capH) return;
-  const g = await window.api.getWindowGeometry(state.hwnd);
-  if (g && g.win && g.client) applyMapFromGeometry(g, firstRun);
-  else if (firstRun) {
-    map.scaleX = map.scaleY = 1; map.invScaleX = map.invScaleY = 1;
-    map.offX = map.offY = 0; map.clientW = capW; map.clientH = capH;
-    map.mode = 'win';
-    dbg('[Map] geometry unavailable, using identity mapping');
-  }
-}
-
-// css-px -> capture -> window -> client; return integers clamped to client
-function mapPoint(e, rect) {
-  const r = rect || getDisplayedVideoRect();
-  const u = (e.clientX - r.x) / r.w;
-  const v = (e.clientY - r.y) / r.h;
-  const capX = u * capW;
-  const capY = v * capH;
-
-  const winX = capX * map.invScaleX;
-  const winY = capY * map.invScaleY;
-
-  const cxFloat = winX - (map.offX || 0);
-  const cyFloat = winY - (map.offY || 0);
-
-  const cx = Math.min(Math.max(0, Math.round(cxFloat)), Math.max(0, (map.clientW || capW) - 1));
-  const cy = Math.min(Math.max(0, Math.round(cyFloat)), Math.max(0, (map.clientH || capH) - 1));
-
-  return { cx, cy, capX, capY, winX, winY, r };
-}
-
-function haveTarget() { return !!(state.hwnd && capW && capH); }
-
-function insideVideo(e) {
-  const r = getDisplayedVideoRect();
-  if (e.clientX < r.x || e.clientX > r.x + r.w || e.clientY < r.y || e.clientY > r.y + r.h) return null;
-  return r;
-}
-
-function btnNameFromMouseEvent(e) { return e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'; }
-
-// ============ Pointer handling ============
-
-// keep hover moves even when not dragging
-viewport.addEventListener('mousemove', async (e) => {
-  if (!haveTarget() || clickThrough?.checked) return;
-  const r = insideVideo(e);
-  if (!r) { hideShadow(); return; }
-
-  const now = performance.now();
-  if (now - lastMoveTs < MOVE_THROTTLE_MS) return;
-
-  // stay fresh (window moved, DPI change, etc.)
-  recalcMap().catch(()=>{});
-
-  const p = mapPoint(e, r);
-  lastMoveTs = now;
-
-  // visualize (map back to viewport)
-  // const vx = r.x + (p.capX / capW) * r.w;
-  // const vy = r.y + (p.capY / capH) * r.h;
-  // showShadow(vx, vy);
-
-  await window.api.mouseMove({ hwnd: state.hwnd, x: p.cx, y: p.cy, mode: 'real' });
-
-  if (down && !down.sentDown && down.button === 'left') {
-    const dx = Math.abs(p.cx - down.startCX);
-    const dy = Math.abs(p.cy - down.startCY);
-    if (dx >= DRAG_PX || dy >= DRAG_PX) {
-      await window.api.mouseDown({ hwnd: state.hwnd, x: down.startCX, y: down.startCY, button: 'left' });
-      down.sentDown = true;
-      down.dragging = true;
-    }
-  }
-});
-
-viewport.addEventListener('mouseleave', () => hideShadow());
-
-viewport.addEventListener('mousedown', async (e) => {
-  if (!haveTarget() || clickThrough?.checked) return;
-  const r = insideVideo(e);
-  if (!r) return;
-  e.preventDefault();
-
-  await recalcMap(); // fresh geom each gesture
-
-  if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; } // cancel pending single
-
-  const { cx, cy } = mapPoint(e, r);
-  const button = btnNameFromMouseEvent(e);
-
-  down = {
-    button,
-    startCX: cx, startCY: cy,
-    lastCX: cx,  lastCY: cy,
-    sentDown: false,
-    dragging: false,
-    t0: performance.now()
-  };
-
-  // Right/middle: press immediately
-  if (button !== 'left') {
-    await window.api.mouseDown({ hwnd: state.hwnd, x: cx, y: cy, button });
-    down.sentDown = true;
-  }
-});
-
-viewport.addEventListener('mouseup', async (e) => {
-  if (!haveTarget() || !down || clickThrough?.checked) return;
-  const r = insideVideo(e);
-  if (!r) return;
-  e.preventDefault();
-
-  const { cx, cy } = mapPoint(e, r);
-
-  // If we already started a drag, finish it
-  if (down.sentDown) {
-    await window.api.mouseUp({ hwnd: state.hwnd, x: cx, y: cy, button: down.button });
-    down = null;
-    return;
-  }
-
-  // Otherwise this is a "click" (no drag). Defer to allow dblclick detection.
-  const sx = down.startCX, sy = down.startCY, btn = down.button;
-  down = null;
-
-  clickTimer = setTimeout(async () => {
-    clickTimer = null;
-    if (btn === 'left' && useSendInput?.checked) {
-      // "Real" click on screen
-      await window.api.mouseSendinput({ hwnd: state.hwnd, x: sx, y: sy });
-    } else {
-      // PostMessage sequence
-      await window.api.mouseDown({ hwnd: state.hwnd, x: sx, y: sy, button: btn });
-      await window.api.mouseUp({ hwnd: state.hwnd, x: sx, y: sy, button: btn });
-    }
-  }, CLICK_DELAY_MS);
-});
-
-// Native dblclick from the renderer view (cancel pending single)
-viewport.addEventListener('dblclick', async (e) => {
-  if (!haveTarget() || clickThrough?.checked) return;
-  const r = insideVideo(e);
-  if (!r) return;
-  e.preventDefault();
-  if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
-
-  await recalcMap();
-  const { cx, cy } = mapPoint(e, r);
-  await window.api.mouseDbl({ hwnd: state.hwnd, x: cx, y: cy, button: 'left' });
-});
-
-// Wheel -> forward as wheel to worker (vertical only here)
-viewport.addEventListener('wheel', async (e) => {
-  if (!haveTarget() || clickThrough?.checked) return;
-  const r = insideVideo(e);
-  if (!r) return;
-  e.preventDefault();
-
-  await recalcMap();
-  const { cx, cy } = mapPoint(e, r);
-  const delta = Math.max(-120, Math.min(120, -e.deltaY));
-  await window.api.mouseWheel({ hwnd: state.hwnd, x: cx, y: cy, delta, horiz:false });
-}, { passive: false });
-
 // ============ Profiles (localStorage, lightweight) ============
 
 function loadProfiles() {
@@ -659,7 +310,6 @@ document.getElementById('applyProfile')?.addEventListener('click', async () => {
       found = true; break;
     }
   }
-  if (found) await autoMirrorFromSelection();
   // audio
   for (const opt of deviceSelect.options) {
     if (opt.value === p.audioDeviceId || opt.text === p.audioDeviceName) {
@@ -682,10 +332,6 @@ document.getElementById('deleteProfile')?.addEventListener('click', () => {
 
 // ============ Misc ============
 
-video?.addEventListener('loadedmetadata', () => {
-  capW = video.videoWidth;
-  capH = video.videoHeight;
-});
 
 viewport?.addEventListener('contextmenu', (e) => {
   // keep native menus on target app, not our window
