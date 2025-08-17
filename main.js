@@ -306,8 +306,8 @@ function Handle-SetPos($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
-  $flags = ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED)
+  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
+  $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED)
   $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -317,11 +317,20 @@ function Handle-SetPos($req) {
   Out-JsonLine(@{ type='log'; message="SetWindowPos hwnd=$hwnd x=$x y=$y w=$w h=$h" })
   $pid = 0
   $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+  $fg = [U]::GetForegroundWindow()
+  $fgPid = 0
+  $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
   $ctid = [U]::GetCurrentThreadId()
-  try { [U]::AttachThreadInput($ctid, $tid, $true) } catch {}
+  try {
+    [U]::AttachThreadInput($ctid, $tid, $true)
+    [U]::AttachThreadInput($ctid, $fgTid, $true)
+  } catch {}
   [void][U]::SetForegroundWindow($hwnd)
   [void][U]::SetFocus($hwnd)
-  try { [U]::AttachThreadInput($ctid, $tid, $false) } catch {}
+  try {
+    [U]::AttachThreadInput($ctid, $fgTid, $false)
+    [U]::AttachThreadInput($ctid, $tid, $false)
+  } catch {}
   try { [void][U]::EnableWindow($hwnd, $true) } catch {}
   if (CoalesceBool $req.keepAlive $false) {
     $cx = CoalesceInt $req.px 2
@@ -361,11 +370,20 @@ function Handle-KeepAlive($req) {
   if (CoalesceBool $req.activate $false) {
     $pid = 0
     $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+    $fg = [U]::GetForegroundWindow()
+    $fgPid = 0
+    $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
     $ctid = [U]::GetCurrentThreadId()
-    try { [U]::AttachThreadInput($ctid, $tid, $true) } catch {}
+    try {
+      [U]::AttachThreadInput($ctid, $tid, $true)
+      [U]::AttachThreadInput($ctid, $fgTid, $true)
+    } catch {}
     [void][U]::SetForegroundWindow($hwnd)
     [void][U]::SetFocus($hwnd)
-    try { [U]::AttachThreadInput($ctid, $tid, $false) } catch {}
+    try {
+      [U]::AttachThreadInput($ctid, $fgTid, $false)
+      [U]::AttachThreadInput($ctid, $tid, $false)
+    } catch {}
     try { [void][U]::EnableWindow($hwnd, $true) } catch {}
   }
   @{ id=$req.id; ok=$true }
@@ -1187,7 +1205,6 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
-  workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
   if (pendingSetPos) { setPosAgain = true; return; }
   const { x, y, width: w, height: h } = lastEmbedBounds;
   appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
@@ -1207,6 +1224,9 @@ function applyLastBounds() {
       setTimeout(() => {
         workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
       }, 300);
+      setTimeout(() => {
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+      }, 600);
       if (setPosAgain) {
         setPosAgain = false;
         applyLastBounds();
@@ -1219,7 +1239,7 @@ function scheduleApplyLastBounds() {
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
-  }, 50);
+  }, 100);
 }
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
@@ -1247,8 +1267,8 @@ $s = $s -bor $WS_CHILD;
 $ex = $origEx -band (-bnot $WS_EX_TOPMOST);
 [U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
 $oldParent = [U]::SetParent($child, $parent);
-$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_ASYNCWINDOWPOS = 0x4000;
-[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
+  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
+  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
 $info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx; x = $wr.Left; y = $wr.Top; w = ($wr.Right - $wr.Left); h = ($wr.Bottom - $wr.Top) };
 $info | ConvertTo-Json -Compress;
 `;
@@ -1273,7 +1293,7 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   const height = Math.round(b?.height ?? 0);
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
-  applyLastBounds();
+  scheduleApplyLastBounds();
 });
 
 // ipcMain.handle('force-topmost', async () => {
