@@ -330,8 +330,8 @@ function Handle-SetPos($req) {
     return @{ id=$req.id; ok=$false; err="SetWindowPos failed $err" }
   }
   Out-JsonLine(@{ type='log'; message="SetWindowPos hwnd=$hwnd x=$x y=$y w=$w h=$h" })
-  $pid = 0
-  $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+  $procId = 0
+  $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$procId)
   $fg = [U]::GetForegroundWindow()
   $fgPid = 0
   $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
@@ -398,8 +398,8 @@ function Handle-KeepAlive($req) {
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
   if (CoalesceBool $req.activate $false) {
-    $pid = 0
-    $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+    $procId = 0
+    $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$procId)
     $fg = [U]::GetForegroundWindow()
     $fgPid = 0
     $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
