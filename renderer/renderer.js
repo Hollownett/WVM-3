@@ -18,6 +18,7 @@ const profileName   = document.getElementById('profileName');
 const refreshBtn    = document.getElementById('refresh');
 const refreshAudioBtn= document.getElementById('refreshAudio');
 const locateSVVBtn  = document.getElementById('locateSVV');
+const embedBtn      = document.getElementById('embed');
 const mirrorBtn     = document.getElementById('mirror');
 const routeBtn      = document.getElementById('route');
 const fixCaptureBtn = document.getElementById('fixCapture');
@@ -204,6 +205,13 @@ if (refreshAudioBtn) refreshAudioBtn.addEventListener('click', refreshAudioDevic
 if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
   await window.api.pickSVV();
   await refreshAudioDevices();
+});
+
+if (embedBtn) embedBtn.addEventListener('click', async () => {
+  const id = sourceSelect?.value || '';
+  const parts = id.split(':');
+  const hwnd = Number(parts[1]);
+  if (hwnd) await window.api.embedWindow(hwnd);
 });
 
 if (mirrorBtn) mirrorBtn.addEventListener('click', () => autoMirrorFromSelection());

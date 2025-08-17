@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('api', {
   // hwnd resolvers (IMPORTANT)
   resolveHwndByTitle: (title) => ipcRenderer.invoke('resolve-hwnd-by-title', title),
   resolveHwndByPid:   (pid)   => ipcRenderer.invoke('resolve-hwnd-by-pid', pid),
+  embedWindow: (hwnd) => ipcRenderer.invoke('embed-window', hwnd),
 
   // debug log
   logAppend: (line) => ipcRenderer.invoke('log:append', line),

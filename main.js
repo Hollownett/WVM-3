@@ -1070,6 +1070,37 @@ list.ForEach(s => Console.WriteLine(s));
   });
 });
 
+// ----------------- IPC: Reparent external window into our container -----------------
+ipcMain.handle('embed-window', async (_evt, childHwnd) => {
+  if (!win || !childHwnd) return false;
+  const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+  const ps = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)]
+public struct RECT { public int Left, Top, Right, Bottom; }
+public static class U {
+  [DllImport("user32.dll")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+}
+"@;
+$child = [IntPtr]${childHwnd};
+$parent = [IntPtr]${parentHwnd};
+[U]::SetParent($child, $parent) | Out-Null;
+$rc = New-Object RECT;
+[U]::GetClientRect($parent, [ref]$rc) | Out-Null;
+$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040;
+[U]::SetWindowPos($child, [IntPtr]0, 0, 0, $rc.Right - $rc.Left, $rc.Bottom - $rc.Top, $SWP_NOZORDER -bor $SWP_SHOWWINDOW) | Out-Null;
+Write-Output "OK";
+`;
+  return new Promise((resolve) => {
+    const p = spawn('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
+    p.on('close', () => resolve(true));
+  });
+});
+
 // ipcMain.handle('force-topmost', async () => {
 //   if (!win) return false;
 //   const hwnd = win.getNativeWindowHandle().readInt32LE(0); // 32-bit HWND on Win x64 Electron
