@@ -36,8 +36,18 @@ button:hover { filter:brightness(1.06); }
 
 .hint { margin-top:6px; color:var(--muted); font-size:12px; }
 
-#stage { flex:1; display:flex; align-items:stretch; justify-content:stretch; padding:0; }
-#viewport { position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+#stage { flex:1; position:relative; padding:0; }
+#viewport {
+  position:absolute;
+  top:0;
+  left:0;
+  right:0;
+  bottom:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;
+}
 
 /* Compact polish */
 .compact #controls { display:none; }

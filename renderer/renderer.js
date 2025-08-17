@@ -1,6 +1,7 @@
 // ============ DOM ============
 
 const viewport      = document.getElementById('viewport');
+const stage         = document.getElementById('stage');
 
 const sourceSelect  = document.getElementById('sourceSelect');
 const deviceSelect  = document.getElementById('deviceSelect');
@@ -104,8 +105,7 @@ const closeBtn = document.getElementById('closeBtn');
 if (closeBtn) closeBtn.onclick = () => window.api.winClose();
 if (compactBtn) compactBtn.onclick = () => {
   document.body.classList.toggle('compact');
-  // defer until layout settles so the embedded window can resize correctly
-  requestAnimationFrame(sendEmbedBounds);
+  queueEmbedBounds();
 };
 
 if (pin) pin.addEventListener('change', e => window.api.setAlwaysOnTop(e.target.checked));
@@ -153,6 +153,7 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 });
 
 let embedObserver = null;
+let stageObserver = null;
 let resizeRaf = null;
 
 function getScaledBounds() {
@@ -171,6 +172,14 @@ function sendEmbedBounds() {
   window.api.setEmbeddedBounds(getScaledBounds());
 }
 
+function queueEmbedBounds() {
+  if (resizeRaf) cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = null;
+    sendEmbedBounds();
+  });
+}
+
 if (embedBtn) embedBtn.addEventListener('click', async () => {
   const id = sourceSelect?.value || '';
   const parts = id.split(':');
@@ -179,20 +188,19 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   if (!hwnd || !viewport) return;
   state.hwnd = hwnd;
   state.windowTitle = title;
-  const bounds = getScaledBounds();
-  await window.api.embedWindow(hwnd, bounds);
-  await window.api.keepAliveSet({ hwnd, enable: true });
-  embedObserver?.disconnect();
-  sendEmbedBounds();
-  embedObserver = new ResizeObserver(() => {
-    if (resizeRaf) cancelAnimationFrame(resizeRaf);
-    resizeRaf = requestAnimationFrame(() => {
-      resizeRaf = null;
-      sendEmbedBounds();
-    });
-  });
-  embedObserver.observe(viewport);
-  window.addEventListener('resize', () => requestAnimationFrame(sendEmbedBounds));
+    const bounds = getScaledBounds();
+    await window.api.embedWindow(hwnd, bounds);
+    await window.api.keepAliveSet({ hwnd, enable: true });
+    embedObserver?.disconnect();
+    stageObserver?.disconnect();
+    queueEmbedBounds();
+    embedObserver = new ResizeObserver(queueEmbedBounds);
+    embedObserver.observe(viewport);
+    if (stage) {
+      stageObserver = new ResizeObserver(queueEmbedBounds);
+      stageObserver.observe(stage);
+    }
+    window.addEventListener('resize', queueEmbedBounds);
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
