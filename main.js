@@ -654,7 +654,8 @@ function createWindow () {
   });
 
   // Child window adjustments are applied after renderer reports final bounds
-  win.on('move', () => applyLastBounds());
+  // Debounce during window moves to avoid snapping while resizing
+  win.on('move', scheduleApplyLastBounds);
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
@@ -1240,10 +1241,11 @@ function applyLastBounds() {
 
 function scheduleApplyLastBounds() {
   if (resizeTimer) clearTimeout(resizeTimer);
+  // Debounce child repositioning so live parent resizes are not interrupted
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
-  }, 0);
+  }, 200);
 }
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
