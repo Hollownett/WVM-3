@@ -33,6 +33,7 @@ let reqId = 1;
 const pending = new Map();
 let stderrTail = '';
 let routedAudioPid = null;
+let resizeTimer = null;
 
 function writeWorkerScript() {
   const script = `
@@ -626,7 +627,7 @@ function createWindow () {
     saveSettings();
   });
 
-  win.on('resize', () => applyLastBounds());
+  win.on('resize', () => scheduleApplyLastBounds());
   win.on('move', () => applyLastBounds());
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
@@ -1203,6 +1204,14 @@ function applyLastBounds() {
     });
 }
 
+function scheduleApplyLastBounds() {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
+    applyLastBounds();
+  }, 150);
+}
+
 ipcMain.handle('embed-window', async (_evt, payload) => {
   const { hwnd: childHwnd, bounds } = payload || {};
   if (!win || !childHwnd) return false;
@@ -1254,7 +1263,7 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   const height = Math.round(b?.height ?? 0);
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
-  applyLastBounds();
+  scheduleApplyLastBounds();
 });
 
 // ipcMain.handle('force-topmost', async () => {
