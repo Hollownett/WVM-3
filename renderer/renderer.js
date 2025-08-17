@@ -213,8 +213,8 @@ if (sourceSelect) sourceSelect.addEventListener('change', async () => {
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
-if (deviceSelect) deviceSelect.addEventListener('change', () => attemptAutoRoute());
-if (pidSelect)    pidSelect.addEventListener('change', () => attemptAutoRoute());
+if (deviceSelect) deviceSelect.addEventListener('change', () => { state.audioDeviceId = deviceSelect.value; attemptAutoRoute(); });
+if (pidSelect)    pidSelect.addEventListener('change', () => { state.pid = pidSelect.value; attemptAutoRoute(); });
 
 if (fixCaptureBtn) fixCaptureBtn.addEventListener('click', async () => {
   if (!state.hwnd) return alert('No source hwnd yet.');
@@ -263,6 +263,10 @@ async function refreshAudioDevices() {
     opt.textContent = d.name;
     deviceSelect.appendChild(opt);
   }
+  if (deviceSelect.options.length) {
+    deviceSelect.selectedIndex = 0;
+    state.audioDeviceId = deviceSelect.value;
+  }
   // if we already have a PID, try route
   attemptAutoRoute();
 }
@@ -281,6 +285,8 @@ function fillPidSelect(list) {
     opt.textContent = `${x.pid} — ${x.title}`;
     pidSelect.appendChild(opt);
   }
+  pidSelect.selectedIndex = 0;
+  state.pid = pidSelect.value;
 }
 
 async function attemptAutoRoute() {

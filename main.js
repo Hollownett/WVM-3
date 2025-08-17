@@ -84,6 +84,9 @@ public static class U {
   [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  EnableWindow(IntPtr hWnd, bool bEnable);
+    [DllImport("user32.dll")] public static extern uint  GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool  AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   }
 "@
 
@@ -204,11 +207,6 @@ function Handle-Move($req) {
   $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
-  if (CoalesceBool $req.activate $false) {
-    [void][U]::SetForegroundWindow($hwnd)
-    [void][U]::SetFocus($hwnd)
-    try { [void][U]::EnableWindow($hwnd, $true) } catch {}
-  }
   @{ id=$req.id; ok=$true }
 }
 
@@ -317,8 +315,13 @@ function Handle-SetPos($req) {
     return @{ id=$req.id; ok=$false; err="SetWindowPos failed $err" }
   }
   Out-JsonLine(@{ type='log'; message="SetWindowPos hwnd=$hwnd x=$x y=$y w=$w h=$h" })
+  $pid = 0
+  $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+  $ctid = [U]::GetCurrentThreadId()
+  try { [U]::AttachThreadInput($ctid, $tid, $true) } catch {}
   [void][U]::SetForegroundWindow($hwnd)
   [void][U]::SetFocus($hwnd)
+  try { [U]::AttachThreadInput($ctid, $tid, $false) } catch {}
   try { [void][U]::EnableWindow($hwnd, $true) } catch {}
   if (CoalesceBool $req.keepAlive $false) {
     $cx = CoalesceInt $req.px 2
@@ -356,8 +359,13 @@ function Handle-KeepAlive($req) {
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
   if (CoalesceBool $req.activate $false) {
+    $pid = 0
+    $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+    $ctid = [U]::GetCurrentThreadId()
+    try { [U]::AttachThreadInput($ctid, $tid, $true) } catch {}
     [void][U]::SetForegroundWindow($hwnd)
     [void][U]::SetFocus($hwnd)
+    try { [U]::AttachThreadInput($ctid, $tid, $false) } catch {}
     try { [void][U]::EnableWindow($hwnd, $true) } catch {}
   }
   @{ id=$req.id; ok=$true }
@@ -1179,7 +1187,6 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
-  try { win.blur(); } catch {}
   workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
   if (pendingSetPos) { setPosAgain = true; return; }
   const { x, y, width: w, height: h } = lastEmbedBounds;
@@ -1209,7 +1216,7 @@ function scheduleApplyLastBounds() {
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
-  }, 150);
+  }, 50);
 }
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
@@ -1263,7 +1270,7 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   const height = Math.round(b?.height ?? 0);
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
-  scheduleApplyLastBounds();
+  applyLastBounds();
 });
 
 // ipcMain.handle('force-topmost', async () => {
