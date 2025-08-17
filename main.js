@@ -1219,6 +1219,7 @@ function applyLastBounds() {
     .finally(() => {
       pendingSetPos = false;
       setTimeout(() => {
+        try { win.blur(); } catch {} // release host focus
         workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
       }, 100);
       setTimeout(() => {
@@ -1227,6 +1228,9 @@ function applyLastBounds() {
       setTimeout(() => {
         workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
       }, 600);
+      setTimeout(() => {
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+      }, 1000); // final ping ensures focus after resize
       if (setPosAgain) {
         setPosAgain = false;
         applyLastBounds();
