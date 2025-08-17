@@ -295,15 +295,13 @@ function Handle-Drag($req) {
   @{ id=$req.id; ok=$true }
 }
 
-# Resize/move embedded child window and refocus
+# Resize/move embedded child window without stealing focus
 function Handle-SetPos($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
   $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
   [void][U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED))
-  [void][U]::SetForegroundWindow($hwnd)
-  [void][U]::SetFocus($hwnd)
   @{ id=$req.id; ok=$true }
 }
 
