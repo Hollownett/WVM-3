@@ -78,9 +78,10 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool  IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool  SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-}
-"@
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  }
+  "@
 
 [void][U]::SetProcessDPIAware()
 
@@ -293,6 +294,17 @@ function Handle-Drag($req) {
   @{ id=$req.id; ok=$true }
 }
 
+# Resize/move embedded child window and refocus
+function Handle-SetPos($req) {
+  $hwnd = [IntPtr]([int64]$req.hwnd)
+  if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
+  $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_NOACTIVATE = 0x0010; $SWP_FRAMECHANGED = 0x0020
+  [void][U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED))
+  [void][U]::SetFocus($hwnd)
+  @{ id=$req.id; ok=$true }
+}
+
 # NEW: Keepalive — restore if minimized, push to bottom, send benign mousemove
 function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
@@ -344,6 +356,7 @@ while ($true) {
       'dblclick'  { Handle-DblClick $req }
       'wheel'     { Handle-Wheel $req }
       'drag'      { Handle-Drag $req }
+      'setpos'    { Handle-SetPos $req }
       'keepalive' { Handle-KeepAlive $req }   # <— NEW
       default     { @{ id=$req.id; ok=$false; err='unknown op' } }
     }
@@ -1094,21 +1107,23 @@ list.ForEach(s => Console.WriteLine(s));
 let embeddedHwnd = null;
 let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
-let resizeProc = null; // track active resize powershell
+let pendingSetPos = false;
+let setPosAgain = false;
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
+  if (pendingSetPos) { setPosAgain = true; return; }
+  pendingSetPos = true;
   const { x, y, width: w, height: h } = lastEmbedBounds;
-  const ps = `
-Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetFocus(IntPtr hWnd);\n}\n"@;
-$child = [IntPtr]${embeddedHwnd};
-$SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_NOACTIVATE = 0x0010; $SWP_FRAMECHANGED = 0x0020;
-[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED) | Out-Null;
-[U]::SetFocus($child) | Out-Null;
-`;
-  try { resizeProc?.kill(); } catch {}
-  resizeProc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
-  resizeProc.on('close', () => { resizeProc = null; });
+  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h })
+    .catch(() => {})
+    .finally(() => {
+      pendingSetPos = false;
+      if (setPosAgain) {
+        setPosAgain = false;
+        applyLastBounds();
+      }
+    });
 }
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
