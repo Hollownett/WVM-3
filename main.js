@@ -321,8 +321,8 @@ function Handle-SetPos($req) {
     } catch {}
   }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
-  $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED)
+  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
+  $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
   $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -330,23 +330,6 @@ function Handle-SetPos($req) {
     return @{ id=$req.id; ok=$false; err="SetWindowPos failed $err" }
   }
   Out-JsonLine(@{ type='log'; message="SetWindowPos hwnd=$hwnd x=$x y=$y w=$w h=$h" })
-  $procId = 0
-  $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$procId)
-  $fg = [U]::GetForegroundWindow()
-  $fgPid = 0
-  $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
-  $ctid = [U]::GetCurrentThreadId()
-  try {
-    [U]::AttachThreadInput($ctid, $tid, $true)
-    [U]::AttachThreadInput($ctid, $fgTid, $true)
-  } catch {}
-  [void][U]::SetForegroundWindow($hwnd)
-  [void][U]::SetFocus($hwnd)
-  try {
-    [U]::AttachThreadInput($ctid, $fgTid, $false)
-    [U]::AttachThreadInput($ctid, $tid, $false)
-  } catch {}
-  try { [void][U]::EnableWindow($hwnd, $true) } catch {}
   if (CoalesceBool $req.keepAlive $false) {
     $cx = CoalesceInt $req.px 2
     $cy = CoalesceInt $req.py 2
