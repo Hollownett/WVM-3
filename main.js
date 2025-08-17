@@ -1178,6 +1178,7 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
+  try { win.blur(); } catch {}
   workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
   if (pendingSetPos) { setPosAgain = true; return; }
   const { x, y, width: w, height: h } = lastEmbedBounds;
@@ -1192,7 +1193,9 @@ function applyLastBounds() {
     })
     .finally(() => {
       pendingSetPos = false;
-      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+      setTimeout(() => {
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+      }, 100);
       if (setPosAgain) {
         setPosAgain = false;
         applyLastBounds();
