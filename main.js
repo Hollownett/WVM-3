@@ -83,7 +83,7 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool  SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  EnableWindow(IntPtr hWnd, bool bEnable);
   }
-  "@
+"@
 
 [void][U]::SetProcessDPIAware()
 
