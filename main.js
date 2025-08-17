@@ -1204,6 +1204,9 @@ function applyLastBounds() {
       setTimeout(() => {
         workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
       }, 100);
+      setTimeout(() => {
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+      }, 300);
       if (setPosAgain) {
         setPosAgain = false;
         applyLastBounds();
