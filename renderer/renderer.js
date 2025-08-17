@@ -112,7 +112,13 @@ if (pin) pin.addEventListener('change', e => window.api.setAlwaysOnTop(e.target.
 if (clickThrough) clickThrough.addEventListener('change', e => window.api.setClickThrough(e.target.checked));
 if (opacityRange) {
   opacityRange.addEventListener('input', e => {
-    const v = Number(e.target.value);
+    let v = Number(e.target.value);
+    if (state.hwnd && v < 1) {
+      // Layered windows cannot host child hwnds; lock to 100% opacity
+      v = 1;
+      opacityRange.value = '1';
+      if (opacityVal) opacityVal.textContent = '100%';
+    }
     window.api.setOpacity(v);
     if (opacityVal) opacityVal.textContent = Math.round(v * 100) + '%';
   });
@@ -188,6 +194,9 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   if (!hwnd || !viewport) return;
   state.hwnd = hwnd;
   state.windowTitle = title;
+  await window.api.setOpacity(1);
+  if (opacityRange) opacityRange.value = '1';
+  if (opacityVal) opacityVal.textContent = '100%';
     const bounds = getScaledBounds();
     await window.api.embedWindow(hwnd, bounds);
     await window.api.keepAliveSet({ hwnd, enable: true });
