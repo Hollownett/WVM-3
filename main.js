@@ -1191,8 +1191,6 @@ list.ForEach(s => Console.WriteLine(s));
 let embeddedHwnd = null;
 let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
-let pendingSetPos = false;
-let setPosAgain = false;
 let hostHwnd = null;
 
 function restoreAudioRoute() {
@@ -1226,50 +1224,24 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
-  if (pendingSetPos) { setPosAgain = true; return; }
-  const { x, y, width: w, height: h } = lastEmbedBounds;
-  appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
-  pendingSetPos = true;
-  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true, parent: hostHwnd })
-    .then(() => {
-      appendLog('applyLastBounds: setpos ok');
-    })
-    .catch(err => {
-      appendLog(`applyLastBounds: setpos fail ${err}`);
-    })
-    .finally(() => {
-      pendingSetPos = false;
-      setTimeout(() => {
-        try { win.blur(); } catch {} // release host focus
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
-      }, 100);
-      setTimeout(() => {
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
-      }, 300);
-      setTimeout(() => {
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
-      }, 600);
-      setTimeout(() => {
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
-      }, 1000); // final ping ensures focus after resize
-      if (setPosAgain) {
-        setPosAgain = false;
-        applyLastBounds();
-      }
-    });
+  const child = embeddedHwnd;
+  const bounds = lastEmbedBounds;
+  restoreEmbeddedWindow();
+  embedChild(child, bounds).catch(err => {
+    appendLog(`re-embed fail ${err}`);
+  });
 }
 
 function scheduleApplyLastBounds() {
   if (resizeTimer) clearTimeout(resizeTimer);
-  // Debounce child repositioning so live parent resizes are not interrupted
+  // Debounce re-embedding so live parent resizes are not interrupted
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
   }, 200);
 }
 
-ipcMain.handle('embed-window', async (_evt, payload) => {
-  const { hwnd: childHwnd, bounds } = payload || {};
+async function embedChild(childHwnd, bounds) {
   if (!win || !childHwnd) return false;
   const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
   const x = Math.round(bounds?.x ?? 0);
@@ -1310,6 +1282,12 @@ $info | ConvertTo-Json -Compress;
       resolve(true);
     });
   });
+}
+
+ipcMain.handle('embed-window', async (_evt, payload) => {
+  const { hwnd: childHwnd, bounds } = payload || {};
+  if (embeddedHwnd) restoreEmbeddedWindow();
+  return embedChild(childHwnd, bounds);
 });
 
 ipcMain.on('embed-window-bounds', (_evt, b) => {
