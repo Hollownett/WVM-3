@@ -1122,6 +1122,7 @@ function applyLastBounds() {
   pendingSetPos = true;
   const { x, y, width: w, height: h } = lastEmbedBounds;
   workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h })
+    .then(() => workerCall('keepalive', { hwnd: embeddedHwnd }).catch(() => {}))
     .catch(() => {})
     .finally(() => {
       pendingSetPos = false;
