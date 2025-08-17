@@ -616,18 +616,7 @@ function createWindow () {
   win.on('close', (e) => {
     if (embeddedHwnd && embeddedInfo) {
       e.preventDefault();
-      const ps = `
-Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
-$child = [IntPtr]${embeddedHwnd};
-$GWL_STYLE = -16; $GWL_EXSTYLE = -20;
-[U]::SetParent($child, [IntPtr]${embeddedInfo.parent}) | Out-Null;
-[U]::SetWindowLong($child, $GWL_STYLE, ${embeddedInfo.style}) | Out-Null;
-[U]::SetWindowLong($child, $GWL_EXSTYLE, ${embeddedInfo.ex}) | Out-Null;
-$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
-[U]::SetWindowPos($child, [IntPtr]0, ${embeddedInfo.x}, ${embeddedInfo.y}, ${embeddedInfo.w}, ${embeddedInfo.h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
-`;
-      try { spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true }); } catch {}
-      embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
+      restoreEmbeddedWindow();
       win.close();
       return;
     }
@@ -689,6 +678,7 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
+app.on('before-quit', () => restoreEmbeddedWindow());
 
 // ---- KeepAlive scheduler (no focus stealing) ----
 const keepAliveTimers = new Map();
@@ -1153,6 +1143,26 @@ let lastEmbedBounds = null;
 let pendingSetPos = false;
 let setPosAgain = false;
 
+function restoreEmbeddedWindow() {
+  if (!embeddedHwnd || !embeddedInfo) return;
+  const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+$GWL_STYLE = -16; $GWL_EXSTYLE = -20;
+[U]::SetParent($child, [IntPtr]${embeddedInfo.parent}) | Out-Null;
+[U]::SetWindowLong($child, $GWL_STYLE, ${embeddedInfo.style}) | Out-Null;
+[U]::SetWindowLong($child, $GWL_EXSTYLE, ${embeddedInfo.ex}) | Out-Null;
+$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
+[U]::SetWindowPos($child, [IntPtr]0, ${embeddedInfo.x}, ${embeddedInfo.y}, ${embeddedInfo.w}, ${embeddedInfo.h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
+`;
+  try { spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true }); } catch {}
+  if (keepAliveTimers.has(embeddedHwnd)) {
+    clearInterval(keepAliveTimers.get(embeddedHwnd));
+    keepAliveTimers.delete(embeddedHwnd);
+  }
+  embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
+}
+
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
   if (pendingSetPos) { setPosAgain = true; return; }
@@ -1168,6 +1178,7 @@ function applyLastBounds() {
     })
     .finally(() => {
       pendingSetPos = false;
+      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2 }).catch(() => {});
       if (setPosAgain) {
         setPosAgain = false;
         applyLastBounds();

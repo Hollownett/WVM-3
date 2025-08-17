@@ -201,6 +201,15 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
       stageObserver.observe(stage);
     }
     window.addEventListener('resize', queueEmbedBounds);
+    attemptAutoRoute();
+});
+
+if (sourceSelect) sourceSelect.addEventListener('change', async () => {
+  const title = sourceSelect.options[sourceSelect.selectedIndex]?.text || '';
+  state.windowTitle = title;
+  const list = await window.api.findPidsByTitle(title);
+  fillPidSelect(list);
+  attemptAutoRoute();
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
