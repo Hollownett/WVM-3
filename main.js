@@ -305,6 +305,21 @@ function Handle-Drag($req) {
 function Handle-SetPos($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  if ($req.parent) {
+    $p = [IntPtr]([int64]$req.parent)
+    try {
+      $cur = [U2]::GetAncestor($hwnd, 1)
+      if ($cur -ne $p) { [void][U2]::SetParent($hwnd, $p) }
+      $GWL_STYLE = -16
+      $WS_CHILD = 0x40000000
+      $WS_POPUP = 0x80000000
+      $style = [U2]::GetWindowLong($hwnd, $GWL_STYLE)
+      if (($style -band $WS_CHILD) -eq 0 -or ($style -band $WS_POPUP) -ne 0) {
+        $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
+        [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
+      }
+    } catch {}
+  }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
   $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
   $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED)
@@ -346,6 +361,21 @@ function Handle-SetPos($req) {
 function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  if ($req.parent) {
+    $p = [IntPtr]([int64]$req.parent)
+    try {
+      $cur = [U2]::GetAncestor($hwnd, 1)
+      if ($cur -ne $p) { [void][U2]::SetParent($hwnd, $p) }
+      $GWL_STYLE = -16
+      $WS_CHILD = 0x40000000
+      $WS_POPUP = 0x80000000
+      $style = [U2]::GetWindowLong($hwnd, $GWL_STYLE)
+      if (($style -band $WS_CHILD) -eq 0 -or ($style -band $WS_POPUP) -ne 0) {
+        $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
+        [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
+      }
+    } catch {}
+  }
 
   # only restore if minimized; never steal focus
   if ([U]::IsIconic($hwnd)) { [void][U]::ShowWindowAsync($hwnd, 9) } # SW_RESTORE
@@ -720,7 +750,11 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
   }
   if (enable) {
     const ms = Math.max(1000, Number(periodMs) || 4000);
-    const tick = () => workerCall('keepalive', { hwnd, x: x ?? 2, y: y ?? 2 }).catch(() => {});
+    const tick = () => {
+      const payload = { hwnd, x: x ?? 2, y: y ?? 2 };
+      if (hwnd === embeddedHwnd && hostHwnd) payload.parent = hostHwnd;
+      workerCall('keepalive', payload).catch(() => {});
+    };
     keepAliveTimers.set(hwnd, setInterval(tick, ms));
     tick(); // immediate
   }
@@ -1005,6 +1039,8 @@ public static class W {
 }
 "@;
 
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U2 {\n  [DllImport(\"user32.dll\")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n}\n"@;
+
 $hwnd = [IntPtr]${hwnd};
 $valid = [W]::IsWindow($hwnd);
 Write-Output ("PS: valid={0}" -f $valid);
@@ -1174,6 +1210,7 @@ let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
 let pendingSetPos = false;
 let setPosAgain = false;
+let hostHwnd = null;
 
 function restoreAudioRoute() {
   if (!routedAudioPid) return;
@@ -1201,7 +1238,7 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
     clearInterval(keepAliveTimers.get(embeddedHwnd));
     keepAliveTimers.delete(embeddedHwnd);
   }
-  embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
+  embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null; hostHwnd = null;
 }
 
 function applyLastBounds() {
@@ -1210,7 +1247,7 @@ function applyLastBounds() {
   const { x, y, width: w, height: h } = lastEmbedBounds;
   appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
   pendingSetPos = true;
-  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true })
+  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true, parent: hostHwnd })
     .then(() => {
       appendLog('applyLastBounds: setpos ok');
     })
@@ -1221,16 +1258,16 @@ function applyLastBounds() {
       pendingSetPos = false;
       setTimeout(() => {
         try { win.blur(); } catch {} // release host focus
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
       }, 100);
       setTimeout(() => {
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
       }, 300);
       setTimeout(() => {
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
       }, 600);
       setTimeout(() => {
-        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
+        workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true, parent: hostHwnd }).catch(() => {});
       }, 1000); // final ping ensures focus after resize
       if (setPosAgain) {
         setPosAgain = false;
@@ -1280,6 +1317,7 @@ $info | ConvertTo-Json -Compress;
 `;
   embeddedHwnd = childHwnd;
   lastEmbedBounds = { x, y, width: w, height: h };
+  hostHwnd = parentHwnd;
   return new Promise((resolve) => {
     const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
     let buf = '';
