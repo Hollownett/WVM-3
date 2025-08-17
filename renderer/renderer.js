@@ -1,6 +1,7 @@
 // ============ DOM ============
 
 const viewport      = document.getElementById('viewport');
+const stage         = document.getElementById('stage');
 
 const sourceSelect  = document.getElementById('sourceSelect');
 const deviceSelect  = document.getElementById('deviceSelect');
@@ -104,7 +105,7 @@ const closeBtn = document.getElementById('closeBtn');
 if (closeBtn) closeBtn.onclick = () => window.api.winClose();
 if (compactBtn) compactBtn.onclick = () => {
   document.body.classList.toggle('compact');
-  sendEmbedBounds();
+  queueEmbedBounds();
 };
 
 if (pin) pin.addEventListener('change', e => window.api.setAlwaysOnTop(e.target.checked));
@@ -152,12 +153,31 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 });
 
 let embedObserver = null;
+let stageObserver = null;
 let resizeRaf = null;
+
+function getScaledBounds() {
+  const r = viewport.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  return {
+    x: Math.round(r.left * scale),
+    y: Math.round(r.top * scale),
+    width: Math.round(r.width * scale),
+    height: Math.round(r.height * scale)
+  };
+}
 
 function sendEmbedBounds() {
   if (!viewport || !state.hwnd) return;
-  const r = viewport.getBoundingClientRect();
-  window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+  window.api.setEmbeddedBounds(getScaledBounds());
+}
+
+function queueEmbedBounds() {
+  if (resizeRaf) cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = null;
+    sendEmbedBounds();
+  });
 }
 
 if (embedBtn) embedBtn.addEventListener('click', async () => {
@@ -168,20 +188,19 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   if (!hwnd || !viewport) return;
   state.hwnd = hwnd;
   state.windowTitle = title;
-  const rect = viewport.getBoundingClientRect();
-  await window.api.embedWindow(hwnd, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
-  await window.api.keepAliveSet({ hwnd, enable: true });
-  embedObserver?.disconnect();
-  sendEmbedBounds();
-  embedObserver = new ResizeObserver(() => {
-    if (resizeRaf) cancelAnimationFrame(resizeRaf);
-    resizeRaf = requestAnimationFrame(() => {
-      resizeRaf = null;
-      sendEmbedBounds();
-    });
-  });
-  embedObserver.observe(viewport);
-  window.addEventListener('resize', sendEmbedBounds);
+    const bounds = getScaledBounds();
+    await window.api.embedWindow(hwnd, bounds);
+    await window.api.keepAliveSet({ hwnd, enable: true });
+    embedObserver?.disconnect();
+    stageObserver?.disconnect();
+    queueEmbedBounds();
+    embedObserver = new ResizeObserver(queueEmbedBounds);
+    embedObserver.observe(viewport);
+    if (stage) {
+      stageObserver = new ResizeObserver(queueEmbedBounds);
+      stageObserver.observe(stage);
+    }
+    window.addEventListener('resize', queueEmbedBounds);
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
