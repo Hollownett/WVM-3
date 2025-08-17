@@ -207,11 +207,21 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
   await refreshAudioDevices();
 });
 
+let embedObserver = null;
 if (embedBtn) embedBtn.addEventListener('click', async () => {
   const id = sourceSelect?.value || '';
   const parts = id.split(':');
   const hwnd = Number(parts[1]);
-  if (hwnd) await window.api.embedWindow(hwnd);
+  if (!hwnd || !viewport) return;
+  const rect = viewport.getBoundingClientRect();
+  await window.api.embedWindow(hwnd, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
+  if (video) video.style.display = 'none';
+  embedObserver?.disconnect();
+  embedObserver = new ResizeObserver(() => {
+    const r = viewport.getBoundingClientRect();
+    window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+  });
+  embedObserver.observe(viewport);
 });
 
 if (mirrorBtn) mirrorBtn.addEventListener('click', () => autoMirrorFromSelection());

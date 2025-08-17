@@ -1071,34 +1071,34 @@ list.ForEach(s => Console.WriteLine(s));
 });
 
 // ----------------- IPC: Reparent external window into our container -----------------
-ipcMain.handle('embed-window', async (_evt, childHwnd) => {
+let embeddedHwnd = null;
+
+ipcMain.handle('embed-window', async (_evt, payload) => {
+  const { hwnd: childHwnd, bounds } = payload || {};
   if (!win || !childHwnd) return false;
   const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+  const x = Math.round(bounds?.x ?? 0);
+  const y = Math.round(bounds?.y ?? 0);
+  const w = Math.round(bounds?.width ?? 0);
+  const h = Math.round(bounds?.height ?? 0);
   const ps = `
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-[StructLayout(LayoutKind.Sequential)]
-public struct RECT { public int Left, Top, Right, Bottom; }
-public static class U {
-  [DllImport("user32.dll")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
-  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-}
-"@;
-$child = [IntPtr]${childHwnd};
-$parent = [IntPtr]${parentHwnd};
-[U]::SetParent($child, $parent) | Out-Null;
-$rc = New-Object RECT;
-[U]::GetClientRect($parent, [ref]$rc) | Out-Null;
-$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040;
-[U]::SetWindowPos($child, [IntPtr]0, 0, 0, $rc.Right - $rc.Left, $rc.Bottom - $rc.Top, $SWP_NOZORDER -bor $SWP_SHOWWINDOW) | Out-Null;
-Write-Output "OK";
-`;
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;\n$child = [IntPtr]${childHwnd};\n$parent = [IntPtr]${parentHwnd};\n[U]::SetParent($child, $parent) | Out-Null;\n$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040;\n[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW) | Out-Null;\n`;
+  embeddedHwnd = childHwnd;
   return new Promise((resolve) => {
-    const p = spawn('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
+    const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
     p.on('close', () => resolve(true));
   });
+});
+
+ipcMain.on('embed-window-bounds', (_evt, b) => {
+  if (!embeddedHwnd) return;
+  const x = Math.round(b?.x ?? 0);
+  const y = Math.round(b?.y ?? 0);
+  const w = Math.round(b?.width ?? 0);
+  const h = Math.round(b?.height ?? 0);
+  const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;\n$child = [IntPtr]${embeddedHwnd};\n$SWP_NOZORDER = 0x0004;\n[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER) | Out-Null;\n`;
+  spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
 });
 
 // ipcMain.handle('force-topmost', async () => {
