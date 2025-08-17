@@ -218,15 +218,19 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   await window.api.embedWindow(hwnd, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
   if (video) video.style.display = 'none';
   embedObserver?.disconnect();
+  const sendBounds = () => {
+    const r = viewport.getBoundingClientRect();
+    window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+  };
   embedObserver = new ResizeObserver(() => {
     if (resizeRaf) cancelAnimationFrame(resizeRaf);
     resizeRaf = requestAnimationFrame(() => {
       resizeRaf = null;
-      const r = viewport.getBoundingClientRect();
-      window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+      sendBounds();
     });
   });
   embedObserver.observe(viewport);
+  window.addEventListener('resize', sendBounds);
 });
 
 if (mirrorBtn) mirrorBtn.addEventListener('click', () => autoMirrorFromSelection());

@@ -78,8 +78,9 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool  IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool  SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool  SetForegroundWindow(IntPtr hWnd);
   }
   "@
 
@@ -299,8 +300,9 @@ function Handle-SetPos($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_NOACTIVATE = 0x0010; $SWP_FRAMECHANGED = 0x0020
-  [void][U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED))
+  $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
+  [void][U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED))
+  [void][U]::SetForegroundWindow($hwnd)
   [void][U]::SetFocus($hwnd)
   @{ id=$req.id; ok=$true }
 }
@@ -588,7 +590,7 @@ $GWL_STYLE = -16; $GWL_EXSTYLE = -20;
 [U]::SetWindowLong($child, $GWL_STYLE, ${embeddedInfo.style}) | Out-Null;
 [U]::SetWindowLong($child, $GWL_EXSTYLE, ${embeddedInfo.ex}) | Out-Null;
 $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
-[U]::SetWindowPos($child, [IntPtr]0, 0, 0, 0, 0, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
+[U]::SetWindowPos($child, [IntPtr]0, ${embeddedInfo.x}, ${embeddedInfo.y}, ${embeddedInfo.w}, ${embeddedInfo.h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
 `;
       try { spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true }); } catch {}
       embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
@@ -603,6 +605,10 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
   win.on('unmaximize', () => applyLastBounds());
+  win.on('enter-full-screen', () => applyLastBounds());
+  win.on('leave-full-screen', () => applyLastBounds());
+  win.on('enter-html-full-screen', () => applyLastBounds());
+  win.on('leave-html-full-screen', () => applyLastBounds());
 }
 
 // global hotkey to toggle click-through
@@ -1135,13 +1141,14 @@ ipcMain.handle('embed-window', async (_evt, payload) => {
   const w = Math.round(bounds?.width ?? 0);
   const h = Math.round(bounds?.height ?? 0);
   const ps = `
-Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n}\n"@;
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic struct RECT { public int Left, Top, Right, Bottom; }\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);\n}\n"@;
 $child = [IntPtr]${childHwnd};
 $parent = [IntPtr]${parentHwnd};
 $GWL_STYLE = -16; $GWL_EXSTYLE = -20;
 $WS_CHILD = 0x40000000; $WS_POPUP = 0x80000000; $WS_CAPTION = 0x00C00000; $WS_THICKFRAME = 0x00040000; $WS_EX_TOPMOST = 0x00000008;
 $origStyle = [U]::GetWindowLong($child, $GWL_STYLE);
 $origEx = [U]::GetWindowLong($child, $GWL_EXSTYLE);
+$wr = New-Object RECT; [void][U]::GetWindowRect($child, [ref]$wr);
 $s = $origStyle -band (-bnot $WS_POPUP);
 $s = $s -band (-bnot ($WS_CAPTION -bor $WS_THICKFRAME));
 $s = $s -bor $WS_CHILD;
@@ -1151,7 +1158,7 @@ $ex = $origEx -band (-bnot $WS_EX_TOPMOST);
 $oldParent = [U]::SetParent($child, $parent);
 $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_ASYNCWINDOWPOS = 0x4000;
 [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
-$info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx };
+$info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx; x = $wr.Left; y = $wr.Top; w = ($wr.Right - $wr.Left); h = ($wr.Bottom - $wr.Top) };
 $info | ConvertTo-Json -Compress;
 `;
   embeddedHwnd = childHwnd;
