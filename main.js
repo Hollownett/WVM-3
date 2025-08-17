@@ -317,6 +317,14 @@ function Handle-SetPos($req) {
   Out-JsonLine(@{ type='log'; message="SetWindowPos hwnd=$hwnd x=$x y=$y w=$w h=$h" })
   [void][U]::SetForegroundWindow($hwnd)
   [void][U]::SetFocus($hwnd)
+  try { [void][U]::EnableWindow($hwnd, $true) } catch {}
+  if (CoalesceBool $req.keepAlive $false) {
+    $cx = CoalesceInt $req.px 2
+    $cy = CoalesceInt $req.py 2
+    $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
+    $WM_MOUSEMOVE = 0x0200
+    [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
+  }
   @{ id=$req.id; ok=$true }
 }
 
@@ -1151,10 +1159,9 @@ function applyLastBounds() {
   const { x, y, width: w, height: h } = lastEmbedBounds;
   appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
   pendingSetPos = true;
-  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h })
+  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true })
     .then(() => {
       appendLog('applyLastBounds: setpos ok');
-      return workerCall('keepalive', { hwnd: embeddedHwnd, activate: true }).catch(err => appendLog(`keepalive err ${err}`));
     })
     .catch(err => {
       appendLog(`applyLastBounds: setpos fail ${err}`);
