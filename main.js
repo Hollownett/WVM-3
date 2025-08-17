@@ -81,6 +81,7 @@ public static class U {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool  EnableWindow(IntPtr hWnd, bool bEnable);
   }
   "@
 
@@ -200,7 +201,17 @@ function Handle-Move($req) {
   $cx = [int]$req.x; $cy = [int]$req.y
   $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
   $WM_MOUSEMOVE = 0x0200
-  [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
+  [void][U]::PostMessage(.child, , [IntPtr]::Zero, [IntPtr]([int].lParam))
+  if (CoalesceBool .activate ) {
+    [void][U]::SetForegroundWindow()
+    [void][U]::SetFocus()
+    try { [void][U]::EnableWindow(, ) } catch {}
+  }
+  if (CoalesceBool $req.activate $false) {
+    [void][U]::SetForegroundWindow($hwnd)
+    [void][U]::SetFocus($hwnd)
+    try { [void][U]::EnableWindow($hwnd, $true) } catch {}
+  }
   @{ id=$req.id; ok=$true }
 }
 
@@ -332,6 +343,11 @@ function Handle-KeepAlive($req) {
   $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
+  if (CoalesceBool $req.activate $false) {
+    [void][U]::SetForegroundWindow($hwnd)
+    [void][U]::SetFocus($hwnd)
+    try { [void][U]::EnableWindow($hwnd, $true) } catch {}
+  }
   @{ id=$req.id; ok=$true }
 }
 
@@ -580,8 +596,9 @@ function createWindow () {
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
-  win.on('close', () => {
+  win.on('close', (e) => {
     if (embeddedHwnd && embeddedInfo) {
+      e.preventDefault();
       const ps = `
 Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
 $child = [IntPtr]${embeddedHwnd};
@@ -594,6 +611,8 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
 `;
       try { spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true }); } catch {}
       embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
+      win.close();
+      return;
     }
     settings.bounds = win.getBounds();
     settings.alwaysOnTop = win.isAlwaysOnTop();
@@ -602,6 +621,7 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
 
   win.on('resize', () => applyLastBounds());
   win.on('move', () => applyLastBounds());
+  win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
   win.on('unmaximize', () => applyLastBounds());
@@ -1122,7 +1142,7 @@ function applyLastBounds() {
   pendingSetPos = true;
   const { x, y, width: w, height: h } = lastEmbedBounds;
   workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h })
-    .then(() => workerCall('keepalive', { hwnd: embeddedHwnd }).catch(() => {}))
+    .then(() => workerCall('keepalive', { hwnd: embeddedHwnd, activate: true }).catch(() => {}))
     .catch(() => {})
     .finally(() => {
       pendingSetPos = false;
