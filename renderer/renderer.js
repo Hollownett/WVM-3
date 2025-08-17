@@ -208,6 +208,7 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 });
 
 let embedObserver = null;
+let resizeRaf = null;
 if (embedBtn) embedBtn.addEventListener('click', async () => {
   const id = sourceSelect?.value || '';
   const parts = id.split(':');
@@ -218,8 +219,12 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   if (video) video.style.display = 'none';
   embedObserver?.disconnect();
   embedObserver = new ResizeObserver(() => {
-    const r = viewport.getBoundingClientRect();
-    window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+    if (resizeRaf) cancelAnimationFrame(resizeRaf);
+    resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = null;
+      const r = viewport.getBoundingClientRect();
+      window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+    });
   });
   embedObserver.observe(viewport);
 });

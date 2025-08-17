@@ -1072,6 +1072,7 @@ list.ForEach(s => Console.WriteLine(s));
 
 // ----------------- IPC: Reparent external window into our container -----------------
 let embeddedHwnd = null;
+let resizeProc = null; // track active resize powershell
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
   const { hwnd: childHwnd, bounds } = payload || {};
@@ -1082,7 +1083,23 @@ ipcMain.handle('embed-window', async (_evt, payload) => {
   const w = Math.round(bounds?.width ?? 0);
   const h = Math.round(bounds?.height ?? 0);
   const ps = `
-Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;\n$child = [IntPtr]${childHwnd};\n$parent = [IntPtr]${parentHwnd};\n[U]::SetParent($child, $parent) | Out-Null;\n$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040;\n[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW) | Out-Null;\n`;
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n}\n"@;
+$child = [IntPtr]${childHwnd};
+$parent = [IntPtr]${parentHwnd};
+$GWL_STYLE = -16; $GWL_EXSTYLE = -20;
+$WS_CHILD = 0x40000000; $WS_POPUP = 0x80000000; $WS_CAPTION = 0x00C00000; $WS_THICKFRAME = 0x00040000; $WS_EX_TOPMOST = 0x00000008;
+$s = [U]::GetWindowLong($child, $GWL_STYLE);
+$s = $s -band (-bnot $WS_POPUP);
+$s = $s -band (-bnot ($WS_CAPTION -bor $WS_THICKFRAME));
+$s = $s -bor $WS_CHILD;
+[U]::SetWindowLong($child, $GWL_STYLE, $s) | Out-Null;
+$ex = [U]::GetWindowLong($child, $GWL_EXSTYLE);
+$ex = $ex -band (-bnot $WS_EX_TOPMOST);
+[U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
+[U]::SetParent($child, $parent) | Out-Null;
+$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_ASYNCWINDOWPOS = 0x4000;
+[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
+`;
   embeddedHwnd = childHwnd;
   return new Promise((resolve) => {
     const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
@@ -1097,8 +1114,14 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   const w = Math.round(b?.width ?? 0);
   const h = Math.round(b?.height ?? 0);
   const ps = `
-Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;\n$child = [IntPtr]${embeddedHwnd};\n$SWP_NOZORDER = 0x0004;\n[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER) | Out-Null;\n`;
-  spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+$SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000;
+[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
+`;
+  try { resizeProc?.kill(); } catch {}
+  resizeProc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
+  resizeProc.on('close', () => { resizeProc = null; });
 });
 
 // ipcMain.handle('force-topmost', async () => {
