@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, globalShortcut, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -566,10 +566,30 @@ function createWindow () {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   win.on('close', () => {
+    if (embeddedHwnd && embeddedInfo) {
+      const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+$GWL_STYLE = -16; $GWL_EXSTYLE = -20;
+[U]::SetParent($child, [IntPtr]${embeddedInfo.parent}) | Out-Null;
+[U]::SetWindowLong($child, $GWL_STYLE, ${embeddedInfo.style}) | Out-Null;
+[U]::SetWindowLong($child, $GWL_EXSTYLE, ${embeddedInfo.ex}) | Out-Null;
+$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
+[U]::SetWindowPos($child, [IntPtr]0, 0, 0, 0, 0, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
+`;
+      try { spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true }); } catch {}
+      embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
+    }
     settings.bounds = win.getBounds();
     settings.alwaysOnTop = win.isAlwaysOnTop();
     saveSettings();
   });
+
+  win.on('resize', () => applyLastBounds());
+  win.on('move', () => applyLastBounds());
+  win.on('restore', () => applyLastBounds());
+  win.on('maximize', () => applyLastBounds());
+  win.on('unmaximize', () => applyLastBounds());
 }
 
 // global hotkey to toggle click-through
@@ -1072,7 +1092,24 @@ list.ForEach(s => Console.WriteLine(s));
 
 // ----------------- IPC: Reparent external window into our container -----------------
 let embeddedHwnd = null;
+let embeddedInfo = null; // original parent & styles
+let lastEmbedBounds = null;
 let resizeProc = null; // track active resize powershell
+
+function applyLastBounds() {
+  if (!embeddedHwnd || !lastEmbedBounds) return;
+  const { x, y, width: w, height: h } = lastEmbedBounds;
+  const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetFocus(IntPtr hWnd);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+$SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_NOACTIVATE = 0x0010; $SWP_FRAMECHANGED = 0x0020;
+[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED) | Out-Null;
+[U]::SetFocus($child) | Out-Null;
+`;
+  try { resizeProc?.kill(); } catch {}
+  resizeProc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
+  resizeProc.on('close', () => { resizeProc = null; });
+}
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
   const { hwnd: childHwnd, bounds } = payload || {};
@@ -1088,40 +1125,42 @@ $child = [IntPtr]${childHwnd};
 $parent = [IntPtr]${parentHwnd};
 $GWL_STYLE = -16; $GWL_EXSTYLE = -20;
 $WS_CHILD = 0x40000000; $WS_POPUP = 0x80000000; $WS_CAPTION = 0x00C00000; $WS_THICKFRAME = 0x00040000; $WS_EX_TOPMOST = 0x00000008;
-$s = [U]::GetWindowLong($child, $GWL_STYLE);
-$s = $s -band (-bnot $WS_POPUP);
+$origStyle = [U]::GetWindowLong($child, $GWL_STYLE);
+$origEx = [U]::GetWindowLong($child, $GWL_EXSTYLE);
+$s = $origStyle -band (-bnot $WS_POPUP);
 $s = $s -band (-bnot ($WS_CAPTION -bor $WS_THICKFRAME));
 $s = $s -bor $WS_CHILD;
 [U]::SetWindowLong($child, $GWL_STYLE, $s) | Out-Null;
-$ex = [U]::GetWindowLong($child, $GWL_EXSTYLE);
-$ex = $ex -band (-bnot $WS_EX_TOPMOST);
+$ex = $origEx -band (-bnot $WS_EX_TOPMOST);
 [U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
-[U]::SetParent($child, $parent) | Out-Null;
+$oldParent = [U]::SetParent($child, $parent);
 $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_ASYNCWINDOWPOS = 0x4000;
 [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
+$info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx };
+$info | ConvertTo-Json -Compress;
 `;
   embeddedHwnd = childHwnd;
+  lastEmbedBounds = { x, y, width: w, height: h };
   return new Promise((resolve) => {
     const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
-    p.on('close', () => resolve(true));
+    let buf = '';
+    p.stdout.on('data', d => { buf += d.toString(); });
+    p.on('close', () => {
+      try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
+      resolve(true);
+    });
   });
 });
 
 ipcMain.on('embed-window-bounds', (_evt, b) => {
   if (!embeddedHwnd) return;
-  const x = Math.round(b?.x ?? 0);
-  const y = Math.round(b?.y ?? 0);
-  const w = Math.round(b?.width ?? 0);
-  const h = Math.round(b?.height ?? 0);
-  const ps = `
-Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
-$child = [IntPtr]${embeddedHwnd};
-$SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000;
-[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
-`;
-  try { resizeProc?.kill(); } catch {}
-  resizeProc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
-  resizeProc.on('close', () => { resizeProc = null; });
+  lastEmbedBounds = {
+    x: Math.round(b?.x ?? 0),
+    y: Math.round(b?.y ?? 0),
+    width: Math.round(b?.width ?? 0),
+    height: Math.round(b?.height ?? 0)
+  };
+  applyLastBounds();
 });
 
 // ipcMain.handle('force-topmost', async () => {
