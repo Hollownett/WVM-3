@@ -104,7 +104,8 @@ const closeBtn = document.getElementById('closeBtn');
 if (closeBtn) closeBtn.onclick = () => window.api.winClose();
 if (compactBtn) compactBtn.onclick = () => {
   document.body.classList.toggle('compact');
-  sendEmbedBounds();
+  // defer until layout settles so the embedded window can resize correctly
+  requestAnimationFrame(sendEmbedBounds);
 };
 
 if (pin) pin.addEventListener('change', e => window.api.setAlwaysOnTop(e.target.checked));
@@ -154,10 +155,20 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 let embedObserver = null;
 let resizeRaf = null;
 
+function getScaledBounds() {
+  const r = viewport.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  return {
+    x: Math.round(r.left * scale),
+    y: Math.round(r.top * scale),
+    width: Math.round(r.width * scale),
+    height: Math.round(r.height * scale)
+  };
+}
+
 function sendEmbedBounds() {
   if (!viewport || !state.hwnd) return;
-  const r = viewport.getBoundingClientRect();
-  window.api.setEmbeddedBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
+  window.api.setEmbeddedBounds(getScaledBounds());
 }
 
 if (embedBtn) embedBtn.addEventListener('click', async () => {
@@ -168,8 +179,8 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   if (!hwnd || !viewport) return;
   state.hwnd = hwnd;
   state.windowTitle = title;
-  const rect = viewport.getBoundingClientRect();
-  await window.api.embedWindow(hwnd, { x: rect.left, y: rect.top, width: rect.width, height: rect.height });
+  const bounds = getScaledBounds();
+  await window.api.embedWindow(hwnd, bounds);
   await window.api.keepAliveSet({ hwnd, enable: true });
   embedObserver?.disconnect();
   sendEmbedBounds();
@@ -181,7 +192,7 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
     });
   });
   embedObserver.observe(viewport);
-  window.addEventListener('resize', sendEmbedBounds);
+  window.addEventListener('resize', () => requestAnimationFrame(sendEmbedBounds));
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
