@@ -201,12 +201,7 @@ function Handle-Move($req) {
   $cx = [int]$req.x; $cy = [int]$req.y
   $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
   $WM_MOUSEMOVE = 0x0200
-  [void][U]::PostMessage(.child, , [IntPtr]::Zero, [IntPtr]([int].lParam))
-  if (CoalesceBool .activate ) {
-    [void][U]::SetForegroundWindow()
-    [void][U]::SetFocus()
-    try { [void][U]::EnableWindow(, ) } catch {}
-  }
+  [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
   if (CoalesceBool $req.activate $false) {
     [void][U]::SetForegroundWindow($hwnd)
     [void][U]::SetFocus($hwnd)
@@ -312,7 +307,14 @@ function Handle-SetPos($req) {
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
   $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
-  [void][U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED))
+  $flags = ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED)
+  $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
+  if (-not $ok) {
+    $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    Out-JsonLine(@{ type='log'; message="SetWindowPos failed err=$err hwnd=$hwnd" })
+    return @{ id=$req.id; ok=$false; err="SetWindowPos failed $err" }
+  }
+  Out-JsonLine(@{ type='log'; message="SetWindowPos hwnd=$hwnd x=$x y=$y w=$w h=$h" })
   [void][U]::SetForegroundWindow($hwnd)
   [void][U]::SetFocus($hwnd)
   @{ id=$req.id; ok=$true }
@@ -390,7 +392,10 @@ while ($true) {
   return f;
 }
 
-function logWorker(m) { try { win.webContents.send('debug:log', `[Worker] ${m}`); } catch {} }
+function logWorker(m) {
+  try { win.webContents.send('debug:log', `[Worker] ${m}`); } catch {}
+  try { appendLog(`[Worker] ${m}`); } catch {}
+}
 
 function startClickWorker() {
   const workerPath = writeWorkerScript(); // your function that writes the PS1 to userData
@@ -422,6 +427,10 @@ function startClickWorker() {
         }
         if (msg.type === 'error') {
           logWorker(`err: ${msg.message}`);
+          continue;
+        }
+        if (msg.type === 'log') {
+          logWorker(msg.message);
           continue;
         }
         if (msg.id != null && pending.has(msg.id)) {
@@ -1139,11 +1148,17 @@ let setPosAgain = false;
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
   if (pendingSetPos) { setPosAgain = true; return; }
-  pendingSetPos = true;
   const { x, y, width: w, height: h } = lastEmbedBounds;
+  appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
+  pendingSetPos = true;
   workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h })
-    .then(() => workerCall('keepalive', { hwnd: embeddedHwnd, activate: true }).catch(() => {}))
-    .catch(() => {})
+    .then(() => {
+      appendLog('applyLastBounds: setpos ok');
+      return workerCall('keepalive', { hwnd: embeddedHwnd, activate: true }).catch(err => appendLog(`keepalive err ${err}`));
+    })
+    .catch(err => {
+      appendLog(`applyLastBounds: setpos fail ${err}`);
+    })
     .finally(() => {
       pendingSetPos = false;
       if (setPosAgain) {
@@ -1161,6 +1176,7 @@ ipcMain.handle('embed-window', async (_evt, payload) => {
   const y = Math.round(bounds?.y ?? 0);
   const w = Math.round(bounds?.width ?? 0);
   const h = Math.round(bounds?.height ?? 0);
+  appendLog(`embed-window hwnd=${childHwnd} parent=${parentHwnd} x=${x} y=${y} w=${w} h=${h}`);
   const ps = `
 Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic struct RECT { public int Left, Top, Right, Bottom; }\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);\n}\n"@;
 $child = [IntPtr]${childHwnd};
@@ -1197,12 +1213,12 @@ $info | ConvertTo-Json -Compress;
 
 ipcMain.on('embed-window-bounds', (_evt, b) => {
   if (!embeddedHwnd) return;
-  lastEmbedBounds = {
-    x: Math.round(b?.x ?? 0),
-    y: Math.round(b?.y ?? 0),
-    width: Math.round(b?.width ?? 0),
-    height: Math.round(b?.height ?? 0)
-  };
+  const x = Math.round(b?.x ?? 0);
+  const y = Math.round(b?.y ?? 0);
+  const width = Math.round(b?.width ?? 0);
+  const height = Math.round(b?.height ?? 0);
+  lastEmbedBounds = { x, y, width, height };
+  appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
   applyLastBounds();
 });
 
