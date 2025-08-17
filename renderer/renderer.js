@@ -154,7 +154,7 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 
 let embedObserver = null;
 let stageObserver = null;
-let resizeRaf = null;
+let resizeTimer = null;
 
 function getScaledBounds() {
   const r = viewport.getBoundingClientRect();
@@ -173,11 +173,11 @@ function sendEmbedBounds() {
 }
 
 function queueEmbedBounds() {
-  if (resizeRaf) cancelAnimationFrame(resizeRaf);
-  resizeRaf = requestAnimationFrame(() => {
-    resizeRaf = null;
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
     sendEmbedBounds();
-  });
+  }, 200);
 }
 
 if (embedBtn) embedBtn.addEventListener('click', async () => {

@@ -653,7 +653,7 @@ function createWindow () {
     saveSettings();
   });
 
-  win.on('resize', () => scheduleApplyLastBounds());
+  // Child window adjustments are applied after renderer reports final bounds
   win.on('move', () => applyLastBounds());
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
@@ -1239,7 +1239,7 @@ function scheduleApplyLastBounds() {
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
-  }, 100);
+  }, 0);
 }
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
