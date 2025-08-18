@@ -1,5 +1,5 @@
 const { spawn, spawnSync } = require('child_process');
-const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, globalShortcut, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, globalShortcut, shell, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -43,6 +43,8 @@ let focusIdleTimer = null;
 // periodic keepalive to contain fullscreen escapes
 const KEEPALIVE_INTERVAL_MS = 3000;
 let keepAliveTicker = null;
+// Padding inside the host content area (in pixels)
+const EMBED_PADDING = 4;
 
 function startKeepAliveTicker() {
   if (keepAliveTicker) return;
@@ -50,13 +52,17 @@ function startKeepAliveTicker() {
     if (!embeddedHwnd || !lastEmbedBounds) return;
     const b = clampBounds(lastEmbedBounds);
     const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+    
+    // Check if the window is fullscreen
+    const isFullscreen = win.isFullScreen();
+    
     workerCall('keepalive', {
       hwnd: embeddedHwnd,
       parent: parentHwnd,
-      x: b.x,
-      y: b.y,
-      w: b.width,
-      h: b.height,
+      x: isFullscreen ? 0 : b.x,
+      y: isFullscreen ? 0 : b.y,
+      w: isFullscreen ? win.getBounds().width : b.width,
+      h: isFullscreen ? win.getBounds().height : b.height,
       activate: false
     }).catch(() => {});
   }, KEEPALIVE_INTERVAL_MS);
@@ -842,14 +848,43 @@ function createWindow () {
   win.on('move', () => {
     scheduleApplyLastBounds();
   });
-  win.on('minimize', () => applyLastBounds());
-  win.on('restore', () => applyLastBounds());
-  win.on('maximize', () => applyLastBounds());
-  win.on('unmaximize', () => applyLastBounds());
-  win.on('enter-full-screen', () => applyLastBounds());
-  win.on('leave-full-screen', () => applyLastBounds());
-  win.on('enter-html-full-screen', () => applyLastBounds());
-  win.on('leave-html-full-screen', () => applyLastBounds());
+  
+  // Handle window state changes
+  const handleWindowStateChange = () => {
+    // Wait a bit for the window to settle in its new state
+    setTimeout(() => {
+      if (embeddedHwnd && lastEmbedBounds) {
+        const bounds = win.getContentBounds();
+        const isFullscreen = win.isFullScreen();
+        
+        // Adjust embedded window bounds based on window state
+        const adjustedBounds = {
+          x: 0,
+          y: isFullscreen ? 0 : lastEmbedBounds.y,
+          width: bounds.width,
+          height: isFullscreen ? bounds.height : bounds.height - lastEmbedBounds.y
+        };
+        
+        workerCall('setpos', {
+          hwnd: embeddedHwnd,
+          x: adjustedBounds.x,
+          y: adjustedBounds.y,
+          w: adjustedBounds.width,
+          h: adjustedBounds.height
+        }).catch(() => {});
+      }
+      applyLastBounds();
+    }, 100);
+  };
+
+  win.on('minimize', handleWindowStateChange);
+  win.on('restore', handleWindowStateChange);
+  win.on('maximize', handleWindowStateChange);
+  win.on('unmaximize', handleWindowStateChange);
+  win.on('enter-full-screen', handleWindowStateChange);
+  win.on('leave-full-screen', handleWindowStateChange);
+  win.on('enter-html-full-screen', handleWindowStateChange);
+  win.on('leave-html-full-screen', handleWindowStateChange);
 }
 
 // global hotkey to toggle click-through
@@ -1398,15 +1433,107 @@ let embeddedHwnd = null;
 let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
 let hostHwnd = null;
+let embeddedHtmlFullscreen = false;
+let embeddedHtmlFsBounds = null;
+let embeddedMonitorTimer = null;
+let lastEmbeddedCorrection = 0;
+let lastAdjustTime = 0;
+const ADJUST_COOLDOWN_MS = 250; // don't adjust more often than this
+const ADJUST_THRESHOLD_PX = 3;   // only apply adjustments larger than this
 
 function clampBounds(b) {
   if (!win) return { x: b?.x ?? 0, y: b?.y ?? 0, width: b?.width ?? 0, height: b?.height ?? 0 };
+  // If the host window is fullscreen, clamp against the display work area
+  if (win.isFullScreen && win.isFullScreen()) {
+    try {
+      const display = screen.getDisplayMatching(win.getBounds()) || screen.getPrimaryDisplay();
+      const work = display.workArea; // { x, y, width, height }
+      const width  = Math.min(Math.max(0, b?.width  ?? 0), work.width);
+      const height = Math.min(Math.max(0, b?.height ?? 0), work.height);
+      const x = Math.min(Math.max(0, b?.x ?? 0), work.width  - width);
+      const y = Math.min(Math.max(0, b?.y ?? 0), work.height - height);
+      return { x, y, width, height };
+    } catch (e) {
+      // fallback to content bounds
+    }
+  }
   const parent = win.getContentBounds();
   const width  = Math.min(Math.max(0, b?.width  ?? 0), parent.width);
   const height = Math.min(Math.max(0, b?.height ?? 0), parent.height);
   const x = Math.min(Math.max(0, b?.x ?? 0), parent.width  - width);
   const y = Math.min(Math.max(0, b?.y ?? 0), parent.height - height);
   return { x, y, width, height };
+}
+
+// Apply a small padding inset to the bounds
+function applyPaddingToBounds(b) {
+  if (!b) return b;
+  const pad = EMBED_PADDING;
+  const x = b.x + pad;
+  const y = b.y + pad;
+  const width = Math.max(1, b.width - pad * 2);
+  const height = Math.max(1, b.height - pad * 2);
+  return { x, y, width, height };
+}
+
+// Ensure the embedded window fits inside the parent/content area, applying padding if needed.
+function checkEmbeddedFits() {
+  if (!win || !embeddedHwnd || !lastEmbedBounds) return;
+  try {
+    const now = Date.now();
+    if (now - lastAdjustTime < ADJUST_COOLDOWN_MS) {
+      appendLog(`checkEmbeddedFits: skipping due to cooldown (${now - lastAdjustTime}ms)`);
+      return;
+    }
+    // Determine parent area (content bounds or display workArea if fullscreen)
+    let parentArea;
+    if (win.isFullScreen && win.isFullScreen()) {
+      const display = screen.getDisplayMatching(win.getBounds()) || screen.getPrimaryDisplay();
+      parentArea = display.workArea;
+    } else {
+      parentArea = win.getContentBounds();
+    }
+
+    // Start with lastEmbedBounds, apply padding, and clamp to parent area
+    let b = applyPaddingToBounds(lastEmbedBounds);
+    // Ensure width/height don't exceed parent area
+    if (b.width > parentArea.width - EMBED_PADDING * 2) b.width = Math.max(1, parentArea.width - EMBED_PADDING * 2);
+    if (b.height > parentArea.height - EMBED_PADDING * 2) b.height = Math.max(1, parentArea.height - EMBED_PADDING * 2);
+
+    // Ensure x/y are within parent area
+    if (b.x < parentArea.x) b.x = parentArea.x + EMBED_PADDING;
+    if (b.y < parentArea.y) b.y = parentArea.y + EMBED_PADDING;
+    if (b.x + b.width > parentArea.x + parentArea.width) b.x = Math.max(parentArea.x + EMBED_PADDING, parentArea.x + parentArea.width - b.width - EMBED_PADDING);
+    if (b.y + b.height > parentArea.y + parentArea.height) b.y = Math.max(parentArea.y + EMBED_PADDING, parentArea.y + parentArea.height - b.height - EMBED_PADDING);
+
+    // Convert parent-relative coords to content-relative coords if needed
+    // win.getContentBounds returns x/y in screen coords; we want coordinates relative to content origin
+    const contentBounds = win.getContentBounds();
+    const relX = b.x - contentBounds.x;
+    const relY = b.y - contentBounds.y;
+
+    const newBounds = { x: Math.round(relX), y: Math.round(relY), width: Math.round(b.width), height: Math.round(b.height) };
+    if (!newBounds) return;
+    const prev = lastEmbedBounds;
+    // compute max delta
+    const dx = Math.abs(newBounds.x - prev.x);
+    const dy = Math.abs(newBounds.y - prev.y);
+    const dw = Math.abs(newBounds.width - prev.width);
+    const dh = Math.abs(newBounds.height - prev.height);
+    const maxDelta = Math.max(dx, dy, dw, dh);
+    if (maxDelta <= ADJUST_THRESHOLD_PX) {
+      appendLog(`checkEmbeddedFits: change below threshold (${maxDelta}px) - no update`);
+      return;
+    }
+    // Prevent aggressive shrinking: if change is a shrink but small relative, ignore
+    // (this is already covered by threshold)
+    appendLog(`Adjusting embedded bounds for padding/fitting: from=${JSON.stringify(prev)} to=${JSON.stringify(newBounds)} (delta=${maxDelta}px)`);
+    lastEmbedBounds = newBounds;
+    lastAdjustTime = now;
+    scheduleApplyLastBounds();
+  } catch (e) {
+    appendLog('checkEmbeddedFits error: ' + e);
+  }
 }
 
 function queueSetPos(bounds) {
@@ -1424,7 +1551,62 @@ function drainSetPos() {
 
   const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
 
+  appendLog(`SetWindowPos requested hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
+  if (h <= 0 || w <= 0) appendLog(`WARNING: attempting to set zero/negative dimension (w=${w} h=${h})`);
+
+  // Helper: query the child geometry and correct if it doesn't match requested bounds
+  const CORRECTION_THRESHOLD = 3; // px tolerance
+  const MAX_CORRECTIONS = 3;
+  let correctionAttempts = 0;
+
+  const tryCorrect = async (reqBounds) => {
+    try {
+      // Ask worker for actual geometry
+      const geom = await workerCall('geom', { hwnd: embeddedHwnd }, 1500).catch(() => null);
+      if (!geom || !geom.ok) return false;
+      const actualWin = geom.win || {};
+      const actualClient = geom.client || {};
+
+      // Compare window rect sizes to requested sizes
+      const dw = reqBounds.w - (actualWin.w || 0);
+      const dh = reqBounds.h - (actualWin.h || 0);
+      appendLog(`Post-SetWindowPos geom hwnd=${embeddedHwnd} win=${JSON.stringify(actualWin)} client=${JSON.stringify(actualClient)} delta=${dw},${dh}`);
+
+      // If differences are within threshold, we're good
+      if (Math.abs(dw) <= CORRECTION_THRESHOLD && Math.abs(dh) <= CORRECTION_THRESHOLD) return true;
+
+      if (correctionAttempts++ >= MAX_CORRECTIONS) {
+        appendLog(`Max correction attempts reached for hwnd=${embeddedHwnd}`);
+        return false;
+      }
+
+      // Adjust requested bounds to account for discrepancy
+      const adj = {
+        x: reqBounds.x,
+        y: reqBounds.y,
+        w: Math.max(1, reqBounds.w + dw),
+        h: Math.max(1, reqBounds.h + dh)
+      };
+      appendLog(`Correction attempt ${correctionAttempts}: applying adjusted bounds ${JSON.stringify(adj)}`);
+      await workerCall('setpos', { hwnd: embeddedHwnd, x: adj.x, y: adj.y, w: adj.w, h: adj.h, keepAlive: true, parent: parentHwnd }).catch(e => appendLog('correction setpos error: ' + e));
+      // small delay to allow windowing system to settle
+      await new Promise(r => setTimeout(r, 80));
+      return tryCorrect(adj);
+    } catch (e) {
+      appendLog('tryCorrect error: ' + e);
+      return false;
+    }
+  };
+
+  // Perform initial setpos then run correction loop
   workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true, parent: parentHwnd })
+    .then(async () => {
+      try {
+        // allow brief settle
+        await new Promise(r => setTimeout(r, 40));
+        await tryCorrect({ x, y, w, h });
+      } catch (e) { appendLog('post-setpos correction error: ' + e); }
+    })
     .catch(err => { appendLog('setpos error: ' + err); })
     .finally(() => {
       inflightSetPos = false;
@@ -1443,6 +1625,7 @@ function scheduleApplyLastBounds() {
 
 function restoreEmbeddedWindow() {
   if (!embeddedHwnd || !embeddedInfo) return;
+  stopEmbeddedMonitor();
   const ps = `
 Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
 $child = [IntPtr]${embeddedHwnd};
@@ -1475,6 +1658,8 @@ $child = [IntPtr]${embeddedHwnd};
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
+  // Ensure fits and apply padding
+  checkEmbeddedFits();
   const b = clampBounds(lastEmbedBounds);
   queueSetPos({ x: b.x, y: b.y, width: b.width, height: b.height });
 }
@@ -1513,6 +1698,7 @@ $info | ConvertTo-Json -Compress;
   embeddedHwnd = childHwnd;
   lastEmbedBounds = { x, y, width: w, height: h };
   hostHwnd = parentHwnd;
+  startEmbeddedMonitor();
   return new Promise((resolve) => {
     const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
     let buf = '';
@@ -1536,6 +1722,36 @@ $info | ConvertTo-Json -Compress;
       resolve(true);
     });
   });
+}
+
+function startEmbeddedMonitor() {
+  stopEmbeddedMonitor();
+  embeddedMonitorTimer = setInterval(async () => {
+    try {
+      if (!embeddedHwnd) return stopEmbeddedMonitor();
+      const now = Date.now();
+      // avoid frequent corrections
+      if (now - lastEmbeddedCorrection < 500) return;
+      const geom = await workerCall('geom', { hwnd: embeddedHwnd }).catch(() => null);
+      if (!geom || !geom.ok) return;
+      const winRect = geom.win || {};
+      const content = win.getContentBounds();
+      // If child width/height exceed content bounds (or sits outside), attempt repair
+      if (winRect.w > content.width || winRect.h > content.height || winRect.Left < content.x || winRect.Top < content.y) {
+        appendLog(`Embedded monitor: detected escape/oversize, repairing child hwnd=${embeddedHwnd} win=${JSON.stringify(winRect)} content=${JSON.stringify(content)}`);
+        // clamp to content with padding
+        const clamped = clampBounds({ x: 0, y: 0, width: content.width, height: content.height });
+        const padded = applyPaddingToBounds(clamped);
+        lastEmbedBounds = padded;
+        scheduleApplyLastBounds();
+        lastEmbeddedCorrection = now;
+      }
+    } catch (e) { appendLog('embeddedMonitor error: ' + e); }
+  }, 700);
+}
+
+function stopEmbeddedMonitor() {
+  if (embeddedMonitorTimer) { clearInterval(embeddedMonitorTimer); embeddedMonitorTimer = null; }
 }
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
@@ -1562,6 +1778,28 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   scheduleApplyLastBounds();
   forceClickThroughOff();
   scheduleFocusAfterIdle();
+});
+
+// HTML5 fullscreen report from renderer
+ipcMain.on('embedded-fullscreen', (_evt, payload) => {
+  try {
+    const { flag, bounds } = payload || {};
+    embeddedHtmlFullscreen = !!flag;
+    embeddedHtmlFsBounds = bounds || null;
+    appendLog(`embedded-fullscreen flag=${embeddedHtmlFullscreen} bounds=${JSON.stringify(embeddedHtmlFsBounds)}`);
+    if (embeddedHtmlFullscreen && embeddedHwnd) {
+      // clamp to the host content area (content bounds are 0..width/height)
+      const b = { x: 0, y: 0, width: bounds.width || win.getContentBounds().width, height: bounds.height || win.getContentBounds().height };
+      lastEmbedBounds = clampBounds(b);
+      scheduleApplyLastBounds();
+    } else if (!embeddedHtmlFullscreen && embeddedHwnd) {
+      // restore previous bounds
+      if (embeddedInfo) {
+        lastEmbedBounds = clampBounds(lastEmbedBounds || { x: 0, y: 0, width: win.getContentBounds().width, height: win.getContentBounds().height });
+        scheduleApplyLastBounds();
+      }
+    }
+  } catch (e) { appendLog('embedded-fullscreen handler error: ' + e); }
 });
 
 ipcMain.handle('restore-embedded', () => {

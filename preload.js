@@ -66,4 +66,7 @@ contextBridge.exposeInMainWorld('api', {
   mouseWheel:    (p) => ipcRenderer.invoke('mouse:wheel', p),
   mouseDrag:     (p) => ipcRenderer.invoke('mouse:drag', p),
   keepAliveSet: (p) => ipcRenderer.invoke('keepalive:set', p)
+  ,
+  // report when renderer content goes into/out of HTML5 fullscreen
+  reportFullscreen: (flag, bounds) => ipcRenderer.send('embedded-fullscreen', { flag, bounds })
 });

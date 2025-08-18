@@ -233,18 +233,81 @@ let stageObserver = null;
 function getScaledBounds() {
   const r = viewport.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
-  return {
-    x: Math.round(r.left * scale),
-    y: Math.round(r.top * scale),
-    width: Math.round(r.width * scale),
-    height: Math.round(r.height * scale)
-  };
+  // If a document-level fullscreen is active, map to the screen/client size
+  const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+  if (isFullscreen) {
+    return {
+      x: 0,
+      y: 0,
+      width: Math.max(1, Math.round(window.innerWidth * scale)),
+      height: Math.max(1, Math.round(window.innerHeight * scale))
+    };
+  }
+
+  // Prefer viewport rect, but fall back to stage or window sizes when a zero-height is encountered
+  let width = Math.round(r.width * scale);
+  let height = Math.round(r.height * scale);
+  let x = Math.round(r.left * scale);
+  let y = Math.round(r.top * scale);
+
+  if (height <= 1 || width <= 1) {
+    const s = stage?.getBoundingClientRect();
+    if (s && s.height > 1) {
+      width = Math.round(s.width * scale);
+      height = Math.round(s.height * scale);
+      x = Math.round(s.left * scale);
+      y = Math.round(s.top * scale);
+    }
+  }
+
+  if (height <= 1 || width <= 1) {
+    // final fallback to window inner size
+    width = Math.max(1, Math.round(window.innerWidth * scale));
+    height = Math.max(1, Math.round(window.innerHeight * scale));
+    x = 0; y = 0;
+  }
+
+  return { x, y, width: Math.max(1, width), height: Math.max(1, height) };
 }
 
 function sendEmbedBounds() {
   if (!viewport || !state.hwnd) return;
-  window.api.setEmbeddedBounds(getScaledBounds());
+  const bounds = getScaledBounds();
+  // Defensive: never send zero dimensions. If we detect small/invalid dims, retry shortly.
+  if (bounds.width > 1 && bounds.height > 1) {
+    window.api.setEmbeddedBounds(bounds);
+  } else {
+    dbg(`Invalid bounds (will retry): ${JSON.stringify(bounds)}`);
+    // Try again once after a short delay to allow layout to settle
+    setTimeout(() => {
+      const b2 = getScaledBounds();
+      if (b2.width > 1 && b2.height > 1) {
+        window.api.setEmbeddedBounds(b2);
+      } else {
+        dbg(`Bounds still invalid after retry: ${JSON.stringify(b2)}`);
+      }
+    }, 120);
+  }
 }
+
+// Report HTML5 fullscreen to main so it can clamp the child to the host content area
+function reportFullscreenState() {
+  const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  const b = { x: 0, y: 0, width: Math.round(window.innerWidth * (window.devicePixelRatio || 1)), height: Math.round(window.innerHeight * (window.devicePixelRatio || 1)) };
+  try { window.api.reportFullscreen(isFs, b); } catch (e) { /* ignore */ }
+}
+
+document.addEventListener('fullscreenchange', () => {
+  dbg('fullscreenchange: ' + !!(document.fullscreenElement));
+  reportFullscreenState();
+  // ensure bounds are re-sent immediately
+  queueEmbedBounds();
+});
+document.addEventListener('webkitfullscreenchange', () => {
+  dbg('webkitfullscreenchange: ' + !!(document.webkitFullscreenElement));
+  reportFullscreenState();
+  queueEmbedBounds();
+});
 
 function queueEmbedBounds() {
   // kick the high-frequency pump and schedule a short stop when idle
@@ -266,8 +329,24 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   setLoading(true, 'Embedding window…');
   try {
     const bounds = getScaledBounds();
+    if (!bounds || bounds.width <= 1 || bounds.height <= 1) {
+      dbg(`Aborting embed: invalid bounds ${JSON.stringify(bounds)}`);
+      alert('Embed failed: calculated bounds are invalid (height or width too small). Try resizing the window slightly and try again.');
+      return;
+    }
     await window.api.embedWindow(hwnd, bounds);
     await window.api.keepAliveSet({ hwnd, enable: true });
+    
+    // Force layout recalculation
+    viewport.style.display = 'none';
+    viewport.offsetHeight; // Force reflow
+    viewport.style.display = '';
+    
+    // Slight delay before sending bounds again
+    setTimeout(() => {
+      queueEmbedBounds();
+    }, 100);
+
     embedObserver?.disconnect();
     stageObserver?.disconnect();
     queueEmbedBounds();
@@ -278,6 +357,10 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
       stageObserver.observe(stage);
     }
     window.addEventListener('resize', queueEmbedBounds);
+
+// Handle fullscreen changes
+document.addEventListener('fullscreenchange', queueEmbedBounds);
+document.addEventListener('webkitfullscreenchange', queueEmbedBounds);
     attemptAutoRoute();
   } finally {
     setLoading(false);

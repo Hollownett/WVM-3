@@ -36,17 +36,42 @@ button:hover { filter:brightness(1.06); }
 
 .hint { margin-top:6px; color:var(--muted); font-size:12px; }
 
-#stage { flex:1; position:relative; padding:0; }
-#viewport {
-  position:absolute;
-  top:0;
-  left:0;
-  right:0;
-  bottom:0;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  overflow:hidden;
+#stage {
+  flex: 1;
+  position: relative;
+  padding: 0;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* Prevent scrollbars */
+}
+
+/* Viewport container */
+#viewport, .viewport {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  min-width: 100px;
+  min-height: 100px;
+  width: 100%;
+  height: 100%;
+  -webkit-app-region: no-drag !important;
+  pointer-events: auto !important;
+}
+
+/* Embedded content */
+#embed, .embed {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  -webkit-app-region: no-drag !important;
+  pointer-events: auto !important;
 }
 
 /* Compact polish */
