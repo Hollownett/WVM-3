@@ -1308,9 +1308,10 @@ function applyLastBounds() {
   const { x, y, width: w, height: h } = clampBounds(lastEmbedBounds);
   appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
   pendingSetPos = true;
+  const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
   workerCall('setpos', {
     hwnd: embeddedHwnd, x, y, w, h, keepAlive: true,
-    parent: hostHwnd   // re-assert parenting if the app tries to detach
+    parent: parentHwnd // re-assert parenting if the app tries to detach
   })
     .then(() => {
       appendLog('applyLastBounds: setpos ok');
@@ -1320,7 +1321,8 @@ function applyLastBounds() {
     })
     .finally(() => {
       pendingSetPos = false;
-      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2 }).catch(() => {});
+      // IMPORTANT: give focus back to the embedded child after resize
+      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
       if (setPosAgain) {
         setPosAgain = false;
         applyLastBounds();
@@ -1369,6 +1371,7 @@ $info | ConvertTo-Json -Compress;
     p.on('close', () => {
       try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
       try { win.webContents.send('reembed-loading', false); } catch {}
+      try { workerCall('keepalive', { hwnd: childHwnd, x: 2, y: 2, activate: true }).catch(() => {}); } catch {}
       resolve(true);
     });
   });
