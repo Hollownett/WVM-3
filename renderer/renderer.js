@@ -24,6 +24,19 @@ const fixCaptureBtn = document.getElementById('fixCapture');
 const compactBtn    = document.getElementById('compactBtn');
 const loading       = document.getElementById('loading');
 
+let overViewport = false;
+
+if (viewport) {
+  viewport.addEventListener('mouseenter', () => {
+    overViewport = true;
+    window.api.setClickThrough(true);
+  });
+  viewport.addEventListener('mouseleave', () => {
+    overViewport = false;
+    window.api.setClickThrough(false);
+  });
+}
+
 
 // debug (kept but non-intrusive)
 const debugArea     = document.getElementById('debugArea');

@@ -398,13 +398,18 @@ function Handle-SetPos($req) {
     } catch {}
   }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER        = 0x0004
   $SWP_NOACTIVATE      = 0x0010
   $SWP_FRAMECHANGED    = 0x0020
   $SWP_NOSENDCHANGING  = 0x0400
   $SWP_ASYNCWINDOWPOS  = 0x4000
-  $flags = ($SWP_NOZORDER -bor $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED -bor $SWP_NOSENDCHANGING -bor $SWP_ASYNCWINDOWPOS)
-  $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
+  $flags = ($SWP_NOACTIVATE -bor $SWP_FRAMECHANGED -bor $SWP_NOSENDCHANGING -bor $SWP_ASYNCWINDOWPOS)
+  $HWND_TOP = [IntPtr]0  # top among siblings (for child windows)
+  $ok = [U]::SetWindowPos($hwnd, $HWND_TOP, $x, $y, $w, $h, $flags)
+  if ($ok) {
+    # quick z-bump with no move/size to beat Chromium’s own reorders
+    $SWP_NOMOVE = 0x0002; $SWP_NOSIZE = 0x0001
+    [void][U]::SetWindowPos($hwnd, $HWND_TOP, 0, 0, 0, 0, ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_NOACTIVATE))
+  }
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
     Out-JsonLine(@{ type='log'; message="SetWindowPos failed err=$err hwnd=$hwnd" })
