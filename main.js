@@ -1258,43 +1258,12 @@ function scheduleApplyLastBounds() {
 
 function scheduleReembedAfterResize() {
   if (reembedTimer) clearTimeout(reembedTimer);
-  if (embeddedHwnd && lastEmbedBounds && win) {
-    try {
-      setEmbeddedVisible(false);
-      win.webContents.send('reembed-loading', true);
-    } catch {}
-  }
-  reembedTimer = setTimeout(async () => {
+  reembedTimer = setTimeout(() => {
     reembedTimer = null;
     if (embeddedHwnd && lastEmbedBounds) {
-      await reembedExisting();
+      embedChild(embeddedHwnd, lastEmbedBounds);
     }
-  }, 100);
-}
-
-function reembedExisting() {
-  if (!win || !embeddedHwnd || !lastEmbedBounds) return false;
-  const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
-  const b = clampBounds(lastEmbedBounds);
-  const x = Math.round(b.x);
-  const y = Math.round(b.y);
-  const w = Math.round(b.width);
-  const h = Math.round(b.height);
-  const ps = `
-Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
-$child = [IntPtr]${embeddedHwnd};
-$parent = [IntPtr]${parentHwnd};
-$SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020;
-[U]::SetParent($child, $parent) | Out-Null;
-[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_FRAMECHANGED) | Out-Null;
-`;
-  return new Promise(resolve => {
-    const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
-    p.on('close', () => {
-      try { win.webContents.send('reembed-loading', false); } catch {}
-      resolve(true);
-    });
-  });
+  }, 200);
 }
 
 function restoreEmbeddedWindow() {

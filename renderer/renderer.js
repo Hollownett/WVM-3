@@ -70,6 +70,12 @@ function setLoading(show, message) {
   }
 }
 
+function setLoading(show, message) {
+  if (!loading) return;
+  loading.textContent = message || 'Loading...';
+  loading.style.display = show ? 'flex' : 'none';
+}
+
 function bindIpcEvents() {
   // remove old listeners if re-binding
   offDebugLog?.();
