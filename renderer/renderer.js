@@ -301,8 +301,8 @@ async function refreshAudioDevices() {
       deviceSelect.selectedIndex = idx >= 0 ? idx : 0;
       state.audioDeviceId = deviceSelect.value;
     }
-    // if we already have a PID, try route
-    attemptAutoRoute();
+    // if we already have a PID, try route and wait so loading clears correctly
+    await attemptAutoRoute();
   } finally {
     setLoading(false);
   }

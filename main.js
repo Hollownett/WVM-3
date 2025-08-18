@@ -961,6 +961,10 @@ ipcMain.handle('route-audio', async (_evt, { pid, deviceId }) => {
   return new Promise((resolve) => {
     const args = ['/SetAppDefault', deviceId, 'all', String(pid)];
     const p = spawn(svv, args, { windowsHide: true });
+    p.on('error', err => {
+      dbg(`route-audio spawn error: ${err.message}`);
+      resolve({ ok: false, error: err.message });
+    });
     p.on('close', code => {
       if (code === 0) routedAudioPid = pid;
       resolve({ ok: code === 0, code });
