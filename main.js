@@ -301,6 +301,23 @@ function Handle-Drag($req) {
   @{ id=$req.id; ok=$true }
 }
 
+function Handle-Key($req) {
+  $hwnd = [IntPtr]([int64]$req.hwnd)
+  if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  if ($req.char) {
+    $ch = [int]$req.char
+    $WM_CHAR = 0x0102
+    [void][U]::PostMessage($hwnd, $WM_CHAR, [IntPtr]$ch, [IntPtr]::Zero)
+  } elseif ($req.vk) {
+    $vk = [int]$req.vk
+    $WM_KEYDOWN = 0x0100
+    $WM_KEYUP   = 0x0101
+    [void][U]::PostMessage($hwnd, $WM_KEYDOWN, [IntPtr]$vk, [IntPtr]::Zero)
+    [void][U]::PostMessage($hwnd, $WM_KEYUP,   [IntPtr]$vk, [IntPtr]::Zero)
+  }
+  @{ id=$req.id; ok=$true }
+}
+
 # Resize/move embedded child window and refocus
 function Handle-SetPos($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
@@ -321,8 +338,8 @@ function Handle-SetPos($req) {
     } catch {}
   }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
-  $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
+  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
+  $flags = ($SWP_NOZORDER -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
   $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -425,6 +442,7 @@ while ($true) {
       'dblclick'  { Handle-DblClick $req }
       'wheel'     { Handle-Wheel $req }
       'drag'      { Handle-Drag $req }
+      'key'       { Handle-Key $req }
       'setpos'    { Handle-SetPos $req }
       'keepalive' { Handle-KeepAlive $req }   # <— NEW
       default     { @{ id=$req.id; ok=$false; err='unknown op' } }
@@ -1005,6 +1023,15 @@ ipcMain.handle('forward-click-sendinput', async (_evt, { hwnd, x, y }) => {
   }
 });
 
+ipcMain.handle('forward-key', async (_evt, payload) => {
+  try {
+    const r = await workerCall('key', payload, 1200);
+    return { ok: !!r.ok };
+  } catch (e) {
+    return { ok:false, error: e.err || String(e) };
+  }
+});
+
 ipcMain.handle('profiles:list', () => getProfiles());
 ipcMain.handle('profiles:save', (_e, profile) => {
   // profile = {name, windowTitle, crop, aspect, audioDeviceId, hwndHint, pidHint}
@@ -1259,6 +1286,18 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
   embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
 }
 
+function setEmbeddedVisible(show) {
+  if (!embeddedHwnd) return;
+  const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+[U]::ShowWindow($child, ${show ? 5 : 0}) | Out-Null;
+`;
+  try {
+    spawnSync('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
+  } catch {}
+}
+
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
   if (pendingSetPos) { setPosAgain = true; return; }
@@ -1284,6 +1323,7 @@ function applyLastBounds() {
 
 async function embedChild(childHwnd, bounds) {
   if (!win || !childHwnd) return false;
+  try { win.webContents.send('reembed-loading', true); } catch {}
   const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
   const b = clampBounds(bounds || {});
   const x = Math.round(b.x);
@@ -1307,8 +1347,8 @@ $s = $s -bor $WS_CHILD;
 $ex = $origEx -band (-bnot $WS_EX_TOPMOST);
 [U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
 $oldParent = [U]::SetParent($child, $parent);
-  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
-  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
+  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020;
+  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_FRAMECHANGED) | Out-Null;
 $info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx; x = $wr.Left; y = $wr.Top; w = ($wr.Right - $wr.Left); h = ($wr.Bottom - $wr.Top) };
 $info | ConvertTo-Json -Compress;
 `;
@@ -1321,6 +1361,7 @@ $info | ConvertTo-Json -Compress;
     p.stdout.on('data', d => { buf += d.toString(); });
     p.on('close', () => {
       try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
+      try { win.webContents.send('reembed-loading', false); } catch {}
       resolve(true);
     });
   });
@@ -1348,6 +1389,16 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
   scheduleApplyLastBounds();
+});
+
+ipcMain.handle('restore-embedded', () => {
+  restoreEmbeddedWindow();
+  return true;
+});
+
+ipcMain.handle('set-embedded-visible', (_e, flag) => {
+  setEmbeddedVisible(!!flag);
+  return true;
 });
 
 // ipcMain.handle('force-topmost', async () => {

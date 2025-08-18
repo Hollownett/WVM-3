@@ -59,7 +59,16 @@ if (dbgCopyBtn)  dbgCopyBtn.onclick  = async () => {
   alert('Debug log copied');
 };
 
-let offDebugLog, offClickThroughUpdated, offToggleCompact;
+let offDebugLog, offClickThroughUpdated, offToggleCompact, offReembed;
+
+function setLoading(show, message) {
+  if (!loading) return;
+  loading.textContent = message || 'Loading...';
+  loading.style.display = show ? 'flex' : 'none';
+  if (window.api?.setEmbeddedVisible) {
+    window.api.setEmbeddedVisible(!show).catch(() => {});
+  }
+}
 
 function setLoading(show, message) {
   if (!loading) return;
@@ -72,6 +81,7 @@ function bindIpcEvents() {
   offDebugLog?.();
   offClickThroughUpdated?.();
   offToggleCompact?.();
+  offReembed?.();
 
   if (window.api?.onDebugLog) {
     offDebugLog = window.api.onDebugLog((msg) => {
@@ -88,13 +98,16 @@ function bindIpcEvents() {
 
   if (window.api?.onToggleCompact)
     offToggleCompact = window.api.onToggleCompact(() => document.body.classList.toggle('compact'));
+  if (window.api?.onReembedLoading)
+    offReembed = window.api.onReembedLoading(flag => setLoading(flag, 'Adjusting window…'));
 }
 
 function unbindIpcEvents() {
   offDebugLog?.();
   offClickThroughUpdated?.();
   offToggleCompact?.();
-  offDebugLog = offClickThroughUpdated = offToggleCompact = null;
+  offReembed?.();
+  offDebugLog = offClickThroughUpdated = offToggleCompact = offReembed = null;
 }
 
 bindIpcEvents();
@@ -118,18 +131,28 @@ if (compactBtn) compactBtn.onclick = () => {
 if (pin) pin.addEventListener('change', e => window.api.setAlwaysOnTop(e.target.checked));
 if (clickThrough) clickThrough.addEventListener('change', e => window.api.setClickThrough(e.target.checked));
 if (opacityRange) {
-  opacityRange.addEventListener('input', e => {
+  opacityRange.addEventListener('input', async e => {
     let v = Number(e.target.value);
     if (state.hwnd && v < 1) {
-      // Layered windows cannot host child hwnds; lock to 100% opacity
-      v = 1;
-      opacityRange.value = '1';
-      if (opacityVal) opacityVal.textContent = '100%';
+      await window.api.restoreEmbeddedWindow();
+      state.hwnd = null;
     }
     window.api.setOpacity(v);
     if (opacityVal) opacityVal.textContent = Math.round(v * 100) + '%';
   });
 }
+
+window.addEventListener('keydown', e => {
+  if (!state.hwnd) return;
+  const tag = e.target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (e.key && e.key.length === 1) {
+    window.api.forwardKey({ hwnd: state.hwnd, char: e.key.charCodeAt(0) });
+  } else {
+    window.api.forwardKey({ hwnd: state.hwnd, vk: e.keyCode });
+  }
+  e.preventDefault();
+});
 
 // bindings may be re-initialized if needed by calling bindIpcEvents again
 

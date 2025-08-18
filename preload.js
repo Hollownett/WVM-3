@@ -20,12 +20,15 @@ contextBridge.exposeInMainWorld('api', {
   // click forwarding
   forwardClickSmart: (payload) => ipcRenderer.invoke('forward-click-smart', payload),
   forwardClickSendInput: (payload) => ipcRenderer.invoke('forward-click-sendinput', payload),
+  forwardKey: (payload) => ipcRenderer.invoke('forward-key', payload),
 
   // hwnd resolvers (IMPORTANT)
   resolveHwndByTitle: (title) => ipcRenderer.invoke('resolve-hwnd-by-title', title),
   resolveHwndByPid:   (pid)   => ipcRenderer.invoke('resolve-hwnd-by-pid', pid),
   embedWindow: (hwnd, bounds) => ipcRenderer.invoke('embed-window', { hwnd, bounds }),
   setEmbeddedBounds: (b) => ipcRenderer.send('embed-window-bounds', b),
+  restoreEmbeddedWindow: () => ipcRenderer.invoke('restore-embedded'),
+  setEmbeddedVisible: (v) => ipcRenderer.invoke('set-embedded-visible', v),
 
   // debug log
   logAppend: (line) => ipcRenderer.invoke('log:append', line),
@@ -44,6 +47,11 @@ contextBridge.exposeInMainWorld('api', {
     const handler = () => cb();
     ipcRenderer.on('toggle-compact', handler);
     return () => ipcRenderer.removeListener('toggle-compact', handler);
+  },
+  onReembedLoading: (cb) => {
+    const handler = (_e, flag) => cb(flag);
+    ipcRenderer.on('reembed-loading', handler);
+    return () => ipcRenderer.removeListener('reembed-loading', handler);
   },
   listTopWindows: () => ipcRenderer.invoke('list-top-windows'),
   getWindowGeometry: (hwnd) => ipcRenderer.invoke('get-window-geometry', hwnd),
