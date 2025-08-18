@@ -35,6 +35,18 @@ let stderrTail = '';
 let routedAudioPid = null;
 let resizeTimer = null;
 
+// --- setpos coalescing + resize idle ---
+let inflightSetPos = false;
+let queuedBounds = null;
+let resizeIdleTimer = null;
+
+// Give the worker a bit more breathing room
+const WORKER_TIMEOUT_MS = 2000;
+
+process.on('unhandledRejection', (err) => {
+  try { appendLog('unhandledRejection: ' + (err?.message || err)); } catch {}
+});
+
 function writeWorkerScript() {
   const script = `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -546,7 +558,7 @@ function ensureWorker() {
   if (!workerProc || workerProc.killed) startClickWorker();
 }
 
-function sendToWorker(op, payload = {}, timeoutMs = 3000) {
+function sendToWorker(op, payload = {}, timeoutMs = WORKER_TIMEOUT_MS) {
   ensureWorker();
   if (!workerReady) {
     // queue a little until 'ready' arrives
@@ -583,7 +595,7 @@ function sendToWorker(op, payload = {}, timeoutMs = 3000) {
   });
 }
 // simple alias so older calls keep working
-const workerCall = (op, payload, timeoutMs = 3000) => sendToWorker(op, payload, timeoutMs);
+const workerCall = (op, payload, timeoutMs = WORKER_TIMEOUT_MS) => sendToWorker(op, payload, timeoutMs);
 
 // kick it off when app is ready
 app.whenReady().then(() => {
@@ -701,8 +713,19 @@ function createWindow () {
 
   // Child window adjustments are applied after renderer reports final bounds
   // Debounce during window moves to avoid snapping while resizing
-  win.on('move', scheduleApplyLastBounds);
-  win.on('resize', scheduleApplyLastBounds);
+  win.on('resize', () => {
+    scheduleApplyLastBounds();
+    clearTimeout(resizeIdleTimer);
+    resizeIdleTimer = setTimeout(() => {
+      if (!embeddedHwnd) return;
+      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true })
+        .catch(() => {});
+    }, 140); // run once when the user stops dragging
+  });
+
+  win.on('move', () => {
+    scheduleApplyLastBounds();
+  });
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
@@ -1249,8 +1272,7 @@ list.ForEach(s => Console.WriteLine(s));
 let embeddedHwnd = null;
 let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
-let pendingSetPos = false;
-let setPosAgain = false;
+let hostHwnd = null;
 
 function clampBounds(b) {
   if (!win) return { x: b?.x ?? 0, y: b?.y ?? 0, width: b?.width ?? 0, height: b?.height ?? 0 };
@@ -1260,6 +1282,28 @@ function clampBounds(b) {
   const x = Math.min(Math.max(0, b?.x ?? 0), parent.width  - width);
   const y = Math.min(Math.max(0, b?.y ?? 0), parent.height - height);
   return { x, y, width, height };
+}
+
+function queueSetPos(bounds) {
+  queuedBounds = bounds;       // keep only the latest
+  drainSetPos();
+}
+
+function drainSetPos() {
+  if (inflightSetPos || !queuedBounds || !embeddedHwnd) return;
+
+  const { x, y, width: w, height: h } = queuedBounds;
+  queuedBounds = null;
+  inflightSetPos = true;
+
+  const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+
+  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true, parent: parentHwnd })
+    .catch(err => { appendLog('setpos error: ' + err); })
+    .finally(() => {
+      inflightSetPos = false;
+      if (queuedBounds) drainSetPos();  // send the next (latest) one
+    });
 }
 
 function scheduleApplyLastBounds() {
@@ -1304,30 +1348,8 @@ $child = [IntPtr]${embeddedHwnd};
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
-  if (pendingSetPos) { setPosAgain = true; return; }
-  const { x, y, width: w, height: h } = clampBounds(lastEmbedBounds);
-  appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
-  pendingSetPos = true;
-  const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
-  workerCall('setpos', {
-    hwnd: embeddedHwnd, x, y, w, h, keepAlive: true,
-    parent: parentHwnd // re-assert parenting if the app tries to detach
-  })
-    .then(() => {
-      appendLog('applyLastBounds: setpos ok');
-    })
-    .catch(err => {
-      appendLog(`applyLastBounds: setpos fail ${err}`);
-    })
-    .finally(() => {
-      pendingSetPos = false;
-      // IMPORTANT: give focus back to the embedded child after resize
-      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true }).catch(() => {});
-      if (setPosAgain) {
-        setPosAgain = false;
-        applyLastBounds();
-      }
-    });
+  const b = clampBounds(lastEmbedBounds);
+  queueSetPos({ x: b.x, y: b.y, width: b.width, height: b.height });
 }
 
 async function embedChild(childHwnd, bounds) {
