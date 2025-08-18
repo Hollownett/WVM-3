@@ -74,11 +74,8 @@ button:hover { filter:brightness(1.06); }
 /* Ensure embedded viewport is fully interactive */
 #viewport, .viewport, #embed, .embed {
   -webkit-app-region: no-drag !important;
-  pointer-events: auto !important;
-  position: relative;
-  z-index: 1;
+   pointer-events: auto !important;
 }
-
 /* Overlays should never swallow clicks */
 #overlay, .overlay, #loading, .loading {
   pointer-events: none !important;
