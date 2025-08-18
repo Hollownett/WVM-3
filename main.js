@@ -32,6 +32,8 @@ let workerReady = false;
 let reqId = 1;
 const pending = new Map();
 let stderrTail = '';
+let routedAudioPid = null;
+let resizeTimer = null;
 
 function writeWorkerScript() {
   const script = `
@@ -82,6 +84,9 @@ public static class U {
   [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool  EnableWindow(IntPtr hWnd, bool bEnable);
+    [DllImport("user32.dll")] public static extern uint  GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool  AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   }
 "@
 
@@ -202,11 +207,6 @@ function Handle-Move($req) {
   $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
-  if (CoalesceBool $req.activate $false) {
-    [void][U]::SetForegroundWindow($hwnd)
-    [void][U]::SetFocus($hwnd)
-    try { [void][U]::EnableWindow($hwnd, $true) } catch {}
-  }
   @{ id=$req.id; ok=$true }
 }
 
@@ -305,9 +305,24 @@ function Handle-Drag($req) {
 function Handle-SetPos($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  if ($req.parent) {
+    $p = [IntPtr]([int64]$req.parent)
+    try {
+      $cur = [U2]::GetAncestor($hwnd, 1)
+      if ($cur -ne $p) { [void][U2]::SetParent($hwnd, $p) }
+      $GWL_STYLE = -16
+      $WS_CHILD = 0x40000000
+      $WS_POPUP = 0x80000000
+      $style = [U2]::GetWindowLong($hwnd, $GWL_STYLE)
+      if (($style -band $WS_CHILD) -eq 0 -or ($style -band $WS_POPUP) -ne 0) {
+        $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
+        [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
+      }
+    } catch {}
+  }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_ASYNCWINDOWPOS = 0x4000; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020
-  $flags = ($SWP_NOZORDER -bor $SWP_ASYNCWINDOWPOS -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED)
+  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
+  $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
   $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -315,9 +330,6 @@ function Handle-SetPos($req) {
     return @{ id=$req.id; ok=$false; err="SetWindowPos failed $err" }
   }
   Out-JsonLine(@{ type='log'; message="SetWindowPos hwnd=$hwnd x=$x y=$y w=$w h=$h" })
-  [void][U]::SetForegroundWindow($hwnd)
-  [void][U]::SetFocus($hwnd)
-  try { [void][U]::EnableWindow($hwnd, $true) } catch {}
   if (CoalesceBool $req.keepAlive $false) {
     $cx = CoalesceInt $req.px 2
     $cy = CoalesceInt $req.py 2
@@ -332,6 +344,21 @@ function Handle-SetPos($req) {
 function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  if ($req.parent) {
+    $p = [IntPtr]([int64]$req.parent)
+    try {
+      $cur = [U2]::GetAncestor($hwnd, 1)
+      if ($cur -ne $p) { [void][U2]::SetParent($hwnd, $p) }
+      $GWL_STYLE = -16
+      $WS_CHILD = 0x40000000
+      $WS_POPUP = 0x80000000
+      $style = [U2]::GetWindowLong($hwnd, $GWL_STYLE)
+      if (($style -band $WS_CHILD) -eq 0 -or ($style -band $WS_POPUP) -ne 0) {
+        $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
+        [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
+      }
+    } catch {}
+  }
 
   # only restore if minimized; never steal focus
   if ([U]::IsIconic($hwnd)) { [void][U]::ShowWindowAsync($hwnd, 9) } # SW_RESTORE
@@ -354,8 +381,22 @@ function Handle-KeepAlive($req) {
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
   if (CoalesceBool $req.activate $false) {
+    $procId = 0
+    $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+    $fg = [U]::GetForegroundWindow()
+    $fgPid = 0
+    $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+    $ctid = [U]::GetCurrentThreadId()
+    try {
+      [U]::AttachThreadInput($ctid, $tid, $true)
+      [U]::AttachThreadInput($ctid, $fgTid, $true)
+    } catch {}
     [void][U]::SetForegroundWindow($hwnd)
     [void][U]::SetFocus($hwnd)
+    try {
+      [U]::AttachThreadInput($ctid, $fgTid, $false)
+      [U]::AttachThreadInput($ctid, $tid, $false)
+    } catch {}
     try { [void][U]::EnableWindow($hwnd, $true) } catch {}
   }
   @{ id=$req.id; ok=$true }
@@ -625,8 +666,9 @@ function createWindow () {
     saveSettings();
   });
 
-  win.on('resize', () => applyLastBounds());
-  win.on('move', () => applyLastBounds());
+  // Child window adjustments are applied after renderer reports final bounds
+  // Debounce during window moves to avoid snapping while resizing
+  win.on('move', scheduleApplyLastBounds);
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
@@ -691,7 +733,11 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
   }
   if (enable) {
     const ms = Math.max(1000, Number(periodMs) || 4000);
-    const tick = () => workerCall('keepalive', { hwnd, x: x ?? 2, y: y ?? 2 }).catch(() => {});
+    const tick = () => {
+      const payload = { hwnd, x: x ?? 2, y: y ?? 2 };
+      if (hwnd === embeddedHwnd && hostHwnd) payload.parent = hostHwnd;
+      workerCall('keepalive', payload).catch(() => {});
+    };
     keepAliveTimers.set(hwnd, setInterval(tick, ms));
     tick(); // immediate
   }
@@ -903,7 +949,10 @@ ipcMain.handle('route-audio', async (_evt, { pid, deviceId }) => {
   return new Promise((resolve) => {
     const args = ['/SetAppDefault', deviceId, 'all', String(pid)];
     const p = spawn(svv, args, { windowsHide: true });
-    p.on('close', code => resolve({ ok: code === 0, code }));
+    p.on('close', code => {
+      if (code === 0) routedAudioPid = pid;
+      resolve({ ok: code === 0, code });
+    });
   });
 });
 
@@ -972,6 +1021,8 @@ public static class W {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 }
 "@;
+
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U2 {\n  [DllImport(\"user32.dll\")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n}\n"@;
 
 $hwnd = [IntPtr]${hwnd};
 $valid = [W]::IsWindow($hwnd);
@@ -1186,8 +1237,7 @@ function applyLastBounds() {
     });
 }
 
-ipcMain.handle('embed-window', async (_evt, payload) => {
-  const { hwnd: childHwnd, bounds } = payload || {};
+async function embedChild(childHwnd, bounds) {
   if (!win || !childHwnd) return false;
   const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
   const x = Math.round(bounds?.x ?? 0);
@@ -1211,13 +1261,14 @@ $s = $s -bor $WS_CHILD;
 $ex = $origEx -band (-bnot $WS_EX_TOPMOST);
 [U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
 $oldParent = [U]::SetParent($child, $parent);
-$SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_ASYNCWINDOWPOS = 0x4000;
-[U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_ASYNCWINDOWPOS) | Out-Null;
+  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
+  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
 $info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx; x = $wr.Left; y = $wr.Top; w = ($wr.Right - $wr.Left); h = ($wr.Bottom - $wr.Top) };
 $info | ConvertTo-Json -Compress;
 `;
   embeddedHwnd = childHwnd;
   lastEmbedBounds = { x, y, width: w, height: h };
+  hostHwnd = parentHwnd;
   return new Promise((resolve) => {
     const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true });
     let buf = '';
@@ -1227,6 +1278,12 @@ $info | ConvertTo-Json -Compress;
       resolve(true);
     });
   });
+}
+
+ipcMain.handle('embed-window', async (_evt, payload) => {
+  const { hwnd: childHwnd, bounds } = payload || {};
+  if (embeddedHwnd) restoreEmbeddedWindow();
+  return embedChild(childHwnd, bounds);
 });
 
 ipcMain.on('embed-window-bounds', (_evt, b) => {
@@ -1237,7 +1294,7 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   const height = Math.round(b?.height ?? 0);
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
-  applyLastBounds();
+  scheduleApplyLastBounds();
 });
 
 // ipcMain.handle('force-topmost', async () => {

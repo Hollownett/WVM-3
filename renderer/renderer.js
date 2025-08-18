@@ -112,7 +112,13 @@ if (pin) pin.addEventListener('change', e => window.api.setAlwaysOnTop(e.target.
 if (clickThrough) clickThrough.addEventListener('change', e => window.api.setClickThrough(e.target.checked));
 if (opacityRange) {
   opacityRange.addEventListener('input', e => {
-    const v = Number(e.target.value);
+    let v = Number(e.target.value);
+    if (state.hwnd && v < 1) {
+      // Layered windows cannot host child hwnds; lock to 100% opacity
+      v = 1;
+      opacityRange.value = '1';
+      if (opacityVal) opacityVal.textContent = '100%';
+    }
     window.api.setOpacity(v);
     if (opacityVal) opacityVal.textContent = Math.round(v * 100) + '%';
   });
@@ -154,7 +160,7 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 
 let embedObserver = null;
 let stageObserver = null;
-let resizeRaf = null;
+let resizeTimer = null;
 
 function getScaledBounds() {
   const r = viewport.getBoundingClientRect();
@@ -173,11 +179,11 @@ function sendEmbedBounds() {
 }
 
 function queueEmbedBounds() {
-  if (resizeRaf) cancelAnimationFrame(resizeRaf);
-  resizeRaf = requestAnimationFrame(() => {
-    resizeRaf = null;
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
     sendEmbedBounds();
-  });
+  }, 200);
 }
 
 if (embedBtn) embedBtn.addEventListener('click', async () => {
@@ -188,6 +194,9 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   if (!hwnd || !viewport) return;
   state.hwnd = hwnd;
   state.windowTitle = title;
+  await window.api.setOpacity(1);
+  if (opacityRange) opacityRange.value = '1';
+  if (opacityVal) opacityVal.textContent = '100%';
     const bounds = getScaledBounds();
     await window.api.embedWindow(hwnd, bounds);
     await window.api.keepAliveSet({ hwnd, enable: true });
@@ -213,8 +222,8 @@ if (sourceSelect) sourceSelect.addEventListener('change', async () => {
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
-if (deviceSelect) deviceSelect.addEventListener('change', () => attemptAutoRoute());
-if (pidSelect)    pidSelect.addEventListener('change', () => attemptAutoRoute());
+if (deviceSelect) deviceSelect.addEventListener('change', () => { state.audioDeviceId = deviceSelect.value; attemptAutoRoute(); });
+if (pidSelect)    pidSelect.addEventListener('change', () => { state.pid = pidSelect.value; attemptAutoRoute(); });
 
 if (fixCaptureBtn) fixCaptureBtn.addEventListener('click', async () => {
   if (!state.hwnd) return alert('No source hwnd yet.');
@@ -263,6 +272,10 @@ async function refreshAudioDevices() {
     opt.textContent = d.name;
     deviceSelect.appendChild(opt);
   }
+  if (deviceSelect.options.length) {
+    deviceSelect.selectedIndex = 0;
+    state.audioDeviceId = deviceSelect.value;
+  }
   // if we already have a PID, try route
   attemptAutoRoute();
 }
@@ -281,6 +294,8 @@ function fillPidSelect(list) {
     opt.textContent = `${x.pid} — ${x.title}`;
     pidSelect.appendChild(opt);
   }
+  pidSelect.selectedIndex = 0;
+  state.pid = pidSelect.value;
 }
 
 async function attemptAutoRoute() {
