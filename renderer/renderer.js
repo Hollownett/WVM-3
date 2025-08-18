@@ -273,7 +273,8 @@ async function refreshAudioDevices() {
     deviceSelect.appendChild(opt);
   }
   if (deviceSelect.options.length) {
-    deviceSelect.selectedIndex = 0;
+    const idx = res.devices.findIndex(d => d.id === res.defaultId);
+    deviceSelect.selectedIndex = idx >= 0 ? idx : 0;
     state.audioDeviceId = deviceSelect.value;
   }
   // if we already have a PID, try route
