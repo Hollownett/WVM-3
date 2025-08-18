@@ -3,6 +3,9 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, globalShortcut, sh
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+// Prevent Chromium from throttling or occluding our window when hidden
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 function dbg(msg) { try { if (win) win.webContents.send('debug:log', `[Audio] ${msg}`); } catch {} }
 let win;
 
@@ -264,18 +267,17 @@ function Handle-Wheel($req) {
   $delta = CoalesceInt $req.delta 120
   $horiz = CoalesceBool $req.horiz $false
 
-  $pt = New-Object POINT; $pt.X = $cx; $pt.Y = $cy
-  [void][U]::ClientToScreen($hwnd, [ref]$pt)
-  $lParam = ((($pt.Y -band 0xFFFF) -shl 16) -bor ($pt.X -band 0xFFFF))
+  $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
+  $lParam = ((($info.scrY -band 0xFFFF) -shl 16) -bor ($info.scrX -band 0xFFFF))
   $wParam = (([int]$delta -band 0xFFFF) -shl 16)
 
   $WM_MOUSEWHEEL  = 0x020A
   $WM_MOUSEHWHEEL = 0x020E
   $msg = if ($horiz) { $WM_MOUSEHWHEEL } else { $WM_MOUSEWHEEL }
 
-  # Send wheel to top-level window to ensure scrolling even when the
-  # child under the cursor does not process WM_MOUSEWHEEL.
-  [void][U]::PostMessage($hwnd, $msg, [IntPtr]([int]$wParam), [IntPtr]([int]$lParam))
+  # Send wheel directly to the child under the cursor so scrolling works
+  # even if the target window lacks focus or is occluded.
+  [void][U]::PostMessage($info.child, $msg, [IntPtr]([int]$wParam), [IntPtr]([int]$lParam))
   @{ id=$req.id; ok=$true }
 }
 
@@ -663,12 +665,37 @@ function createWindow () {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      backgroundThrottling: false
     }
   });
 
   win.setAlwaysOnTop(win.isAlwaysOnTop(), 'screen-saver');
   if (typeof settings.opacity === 'number') win.setOpacity(settings.opacity);
+  // Exclude our overlay from screen capture so the window being mirrored
+  // is still visible even when covered by this BrowserWindow. Electron's
+  // setContentProtection API uses WDA_MONITOR which blacks out content, so
+  // call SetWindowDisplayAffinity with WDA_EXCLUDEFROMCAPTURE directly.
+  if (process.platform === 'win32') {
+    try {
+      const hwndBuf = win.getNativeWindowHandle();
+      const hwndBig = (process.arch === 'x64' || process.arch === 'arm64')
+        ? hwndBuf.readBigUInt64LE(0)
+        : BigInt(hwndBuf.readUInt32LE(0));
+      const hwndLiteral = `0x${hwndBig.toString(16)}`;
+      const ps = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class U {
+  [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+}
+"@
+[U]::SetWindowDisplayAffinity([IntPtr]${hwndLiteral}, 0x00000011) | Out-Null
+`;
+      spawn('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
+    } catch {}
+  }
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
