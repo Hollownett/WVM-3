@@ -11,7 +11,7 @@ body {
   flex-direction:column;
 }
 
-.titlebar { height:40px; background:rgba(20,20,26,.65); border-bottom:1px solid var(--border); -webkit-app-region: drag; }
+.titlebar { height:40px; background:rgba(20,20,26,.65); border-bottom:1px solid var(--border); }
 .titlebar .drag-region { display:flex; align-items:center; justify-content:space-between; height:100%; padding:0 8px; }
 .titlebar .app-title { font-weight:600; letter-spacing:.3px; opacity:.9; }
 .title-actions { -webkit-app-region: no-drag; display:flex; gap:6px; }
@@ -58,10 +58,10 @@ button:hover { filter:brightness(1.06); }
 
 #loading {
   position:fixed;
-  top:0;
   left:0;
   right:0;
   bottom:0;
+  top:40px;
   display:none;
   align-items:center;
   justify-content:center;
@@ -70,3 +70,20 @@ button:hover { filter:brightness(1.06); }
   font-size:20px;
   backdrop-filter:blur(2px);
 }
+
+/* Ensure embedded viewport is fully interactive */
+#viewport, .viewport, #embed, .embed {
+  -webkit-app-region: no-drag !important;
+  pointer-events: auto !important;
+  position: relative;
+  z-index: 1;
+}
+
+/* Overlays should never swallow clicks */
+#overlay, .overlay, #loading, .loading {
+  pointer-events: none !important;
+}
+
+/* Restrict drag regions to explicit header elements */
+.drag-region { -webkit-app-region: drag; }
+.title-actions, .title-actions * { -webkit-app-region: no-drag; }

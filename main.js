@@ -35,6 +35,85 @@ let stderrTail = '';
 let routedAudioPid = null;
 let resizeTimer = null;
 
+// --- setpos coalescing + resize idle ---
+let inflightSetPos = false;
+let queuedBounds = null;
+let focusIdleTimer = null;
+
+// periodic keepalive to contain fullscreen escapes
+const KEEPALIVE_INTERVAL_MS = 3000;
+let keepAliveTicker = null;
+
+function startKeepAliveTicker() {
+  if (keepAliveTicker) return;
+  keepAliveTicker = setInterval(() => {
+    if (!embeddedHwnd || !lastEmbedBounds) return;
+    const b = clampBounds(lastEmbedBounds);
+    const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+    workerCall('keepalive', {
+      hwnd: embeddedHwnd,
+      parent: parentHwnd,
+      x: b.x,
+      y: b.y,
+      w: b.width,
+      h: b.height,
+      activate: false
+    }).catch(() => {});
+  }, KEEPALIVE_INTERVAL_MS);
+}
+
+function forceClickThroughOff() {
+  try { win.setIgnoreMouseEvents(false); } catch {}
+}
+
+function bumpHostToFront() {
+  try {
+    win.setAlwaysOnTop(true, 'screen-saver');
+    setTimeout(() => { try { win.setAlwaysOnTop(false); } catch {} }, 30);
+  } catch {}
+}
+
+function scheduleFocusAfterIdle() {
+  clearTimeout(focusIdleTimer);
+  focusIdleTimer = setTimeout(async () => {
+    if (!embeddedHwnd) return;
+
+    // 1) ensure BrowserWindow isn't click-through
+    forceClickThroughOff();
+
+    // 2) bump parent z-order briefly
+    bumpHostToFront();
+
+    // 3) focus parent then embedded child
+    const b = clampBounds(lastEmbedBounds);
+    const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+    if (!win.isFocused()) { try { win.focus(); } catch {} }
+    try {
+      await workerCall('keepalive', {
+        hwnd: embeddedHwnd,
+        parent: parentHwnd,
+        x: b.x,
+        y: b.y,
+        w: b.width,
+        h: b.height,
+        px: 8,
+        py: 8,
+        activate: true,
+        retries: 3,
+        retryDelayMs: 90,
+        clickOnActivate: true
+      }).catch(() => {});
+    } catch {}
+  }, 140);
+}
+
+// Give the worker a bit more breathing room
+const WORKER_TIMEOUT_MS = 2000;
+
+process.on('unhandledRejection', (err) => {
+  try { appendLog('unhandledRejection: ' + (err?.message || err)); } catch {}
+});
+
 function writeWorkerScript() {
   const script = `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -88,6 +167,34 @@ public static class U {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool  AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   }
+"@ 
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class U2 {
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+  [DllImport("user32.dll")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+}
+"@
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UF {
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out int pid);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+}
 "@
 
 [void][U]::SetProcessDPIAware()
@@ -338,9 +445,18 @@ function Handle-SetPos($req) {
     } catch {}
   }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
-  $flags = ($SWP_NOZORDER -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
-  $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
+  $SWP_NOACTIVATE      = 0x0010
+  $SWP_FRAMECHANGED    = 0x0020
+  $SWP_NOSENDCHANGING  = 0x0400
+  $SWP_ASYNCWINDOWPOS  = 0x4000
+  $flags = ($SWP_NOACTIVATE -bor $SWP_FRAMECHANGED -bor $SWP_NOSENDCHANGING -bor $SWP_ASYNCWINDOWPOS)
+  $HWND_TOP = [IntPtr]0  # top among siblings (for child windows)
+  $ok = [U]::SetWindowPos($hwnd, $HWND_TOP, $x, $y, $w, $h, $flags)
+  if ($ok) {
+    # quick z-bump with no move/size to beat Chromium’s own reorders
+    $SWP_NOMOVE = 0x0002; $SWP_NOSIZE = 0x0001
+    [void][U]::SetWindowPos($hwnd, $HWND_TOP, 0, 0, 0, 0, ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_NOACTIVATE))
+  }
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
     Out-JsonLine(@{ type='log'; message="SetWindowPos failed err=$err hwnd=$hwnd" })
@@ -362,19 +478,35 @@ function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
   if ($req.parent) {
-    $p = [IntPtr]([int64]$req.parent)
     try {
+      $p = [IntPtr]([int64]$req.parent)
       $cur = [U2]::GetAncestor($hwnd, 1)
       if ($cur -ne $p) { [void][U2]::SetParent($hwnd, $p) }
       $GWL_STYLE = -16
+      $GWL_EXSTYLE = -20
       $WS_CHILD = 0x40000000
       $WS_POPUP = 0x80000000
+      $WS_EX_TOPMOST = 0x00000008
       $style = [U2]::GetWindowLong($hwnd, $GWL_STYLE)
-      if (($style -band $WS_CHILD) -eq 0 -or ($style -band $WS_POPUP) -ne 0) {
-        $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
-        [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
-      }
+      $ex    = [U]::GetWindowLong($hwnd, $GWL_EXSTYLE)
+      $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
+      $ex    = $ex -band (-bnot $WS_EX_TOPMOST)
+      [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
+      [void][U]::SetWindowLong($hwnd, $GWL_EXSTYLE, $ex)
     } catch {}
+  }
+
+  if ($req.x -ne $null -and $req.y -ne $null -and $req.w -ne $null -and $req.h -ne $null) {
+    $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
+    $SWP_NOACTIVATE      = 0x0010
+    $SWP_FRAMECHANGED    = 0x0020
+    $SWP_NOSENDCHANGING  = 0x0400
+    $SWP_ASYNCWINDOWPOS  = 0x4000
+    $flags = $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED -bor $SWP_NOSENDCHANGING -bor $SWP_ASYNCWINDOWPOS
+    $HWND_TOP = [IntPtr]0
+    [void][U]::SetWindowPos($hwnd, $HWND_TOP, $x, $y, $w, $h, $flags)
+    $SWP_NOMOVE = 0x0002; $SWP_NOSIZE = 0x0001
+    [void][U]::SetWindowPos($hwnd, $HWND_TOP, 0, 0, 0, 0, ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_NOACTIVATE))
   }
 
   # only restore if minimized; never steal focus
@@ -392,29 +524,46 @@ function Handle-KeepAlive($req) {
   }
 
   # gentle mousemove ping (keeps media alive)
-  $cx = CoalesceInt $req.x 2
-  $cy = CoalesceInt $req.y 2
+  $cx = CoalesceInt $req.px 2
+  $cy = CoalesceInt $req.py 2
   $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
   if (CoalesceBool $req.activate $false) {
-    $procId = 0
-    $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$procId)
-    $fg = [U]::GetForegroundWindow()
-    $fgPid = 0
-    $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
-    $ctid = [U]::GetCurrentThreadId()
-    try {
-      [U]::AttachThreadInput($ctid, $tid, $true)
-      [U]::AttachThreadInput($ctid, $fgTid, $true)
-    } catch {}
-    [void][U]::SetForegroundWindow($hwnd)
-    [void][U]::SetFocus($hwnd)
-    try {
-      [U]::AttachThreadInput($ctid, $fgTid, $false)
-      [U]::AttachThreadInput($ctid, $tid, $false)
-    } catch {}
-    try { [void][U]::EnableWindow($hwnd, $true) } catch {}
+    $retries = if ($req.retries) { [int]$req.retries } else { 1 }
+    $delay   = if ($req.retryDelayMs) { [int]$req.retryDelayMs } else { 60 }
+    for ($i=0; $i -lt $retries; $i++) {
+      try {
+        $GA_ROOT = 2
+        $root = [UF]::GetAncestor($hwnd, $GA_ROOT)
+        $fg   = [UF]::GetForegroundWindow()
+        $out  = 0
+        $fgTid = 0; $myTid = 0
+        $fgTid = [UF]::GetWindowThreadProcessId($fg,   [ref]$out)
+        $out = 0
+        $myTid = [UF]::GetWindowThreadProcessId($root, [ref]$out)
+
+        [void][UF]::AllowSetForegroundWindow(-1) | Out-Null
+        if ($fgTid -ne 0 -and $myTid -ne 0) { [void][UF]::AttachThreadInput($myTid, $fgTid, $true) }
+
+        [void][UF]::BringWindowToTop($root)
+        [void][UF]::SetForegroundWindow($root)
+        [void][UF]::SetActiveWindow($root)
+        [void][UF]::SetFocus($hwnd)
+
+        if ($fgTid -ne 0 -and $myTid -ne 0) { [void][UF]::AttachThreadInput($myTid, $fgTid, $false) }
+
+        if (CoalesceBool $req.clickOnActivate $false) {
+          $x = [int](CoalesceInt $req.px 2); $y = [int](CoalesceInt $req.py 2)
+          $lParam = [IntPtr]((($y -band 0xFFFF) -shl 16) -bor ($x -band 0xFFFF))
+          [void][UF]::SendMessage($hwnd, 0x0201, [IntPtr]1, $lParam)
+          [void][UF]::SendMessage($hwnd, 0x0202, [IntPtr]0, $lParam)
+        }
+        break
+      } catch {
+        Start-Sleep -Milliseconds $delay
+      }
+    }
   }
   @{ id=$req.id; ok=$true }
 }
@@ -531,7 +680,7 @@ function ensureWorker() {
   if (!workerProc || workerProc.killed) startClickWorker();
 }
 
-function sendToWorker(op, payload = {}, timeoutMs = 3000) {
+function sendToWorker(op, payload = {}, timeoutMs = WORKER_TIMEOUT_MS) {
   ensureWorker();
   if (!workerReady) {
     // queue a little until 'ready' arrives
@@ -568,7 +717,7 @@ function sendToWorker(op, payload = {}, timeoutMs = 3000) {
   });
 }
 // simple alias so older calls keep working
-const workerCall = (op, payload, timeoutMs = 3000) => sendToWorker(op, payload, timeoutMs);
+const workerCall = (op, payload, timeoutMs = WORKER_TIMEOUT_MS) => sendToWorker(op, payload, timeoutMs);
 
 // kick it off when app is ready
 app.whenReady().then(() => {
@@ -686,8 +835,13 @@ function createWindow () {
 
   // Child window adjustments are applied after renderer reports final bounds
   // Debounce during window moves to avoid snapping while resizing
-  win.on('move', scheduleApplyLastBounds);
-  win.on('resize', scheduleReembedAfterResize);
+  win.on('resize', () => {
+    scheduleApplyLastBounds();
+  });
+
+  win.on('move', () => {
+    scheduleApplyLastBounds();
+  });
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
@@ -702,11 +856,10 @@ function createWindow () {
 function registerHotkeys() {
   globalShortcut.unregisterAll();
   globalShortcut.register('Control+Shift+I', () => {
-    const flag = !(settings.clickThrough ?? false);
-    if (win) win.setIgnoreMouseEvents(flag, { forward: true });
-    settings.clickThrough = flag;
+    forceClickThroughOff();
+    settings.clickThrough = false;
     saveSettings();
-    if (win) win.webContents.send('clickthrough-updated', flag);
+    if (win) win.webContents.send('clickthrough-updated', false);
   });
 }
 
@@ -732,7 +885,9 @@ function appendLog(line) {
 app.whenReady().then(() => {
   loadSettings();
   createWindow();
+  forceClickThroughOff();
   registerHotkeys();
+  startKeepAliveTicker();
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
@@ -753,8 +908,15 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
   if (enable) {
     const ms = Math.max(1000, Number(periodMs) || 4000);
     const tick = () => {
-      const payload = { hwnd, x: x ?? 2, y: y ?? 2 };
-      if (hwnd === embeddedHwnd && hostHwnd) payload.parent = hostHwnd;
+      const payload = { hwnd, px: x ?? 2, py: y ?? 2 };
+      if (hwnd === embeddedHwnd && hostHwnd && lastEmbedBounds) {
+        const b = clampBounds(lastEmbedBounds);
+        payload.parent = hostHwnd;
+        payload.x = b.x;
+        payload.y = b.y;
+        payload.w = b.width;
+        payload.h = b.height;
+      }
       workerCall('keepalive', payload)
         .then(() => {
           if (hwnd === embeddedHwnd) scheduleApplyLastBounds();
@@ -807,9 +969,10 @@ ipcMain.handle('set-opacity', (_e, value) => {
   const v = Math.max(0.3, Math.min(1, Number(value) || 1));
   win.setOpacity(v); settings.opacity = v; saveSettings(); return v;
 });
-ipcMain.handle('set-click-through', (_e, flag) => {
-  win.setIgnoreMouseEvents(!!flag, { forward: true });
-  settings.clickThrough = !!flag; saveSettings(); return !!flag;
+ipcMain.handle('set-click-through', () => {
+  forceClickThroughOff();
+  settings.clickThrough = false; saveSettings();
+  return false;
 });
 ipcMain.handle('toggle-compact', () => { win.webContents.send('toggle-compact'); });
 
@@ -1234,9 +1397,7 @@ list.ForEach(s => Console.WriteLine(s));
 let embeddedHwnd = null;
 let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
-let pendingSetPos = false;
-let setPosAgain = false;
-let reembedTimer = null;
+let hostHwnd = null;
 
 function clampBounds(b) {
   if (!win) return { x: b?.x ?? 0, y: b?.y ?? 0, width: b?.width ?? 0, height: b?.height ?? 0 };
@@ -1248,21 +1409,35 @@ function clampBounds(b) {
   return { x, y, width, height };
 }
 
+function queueSetPos(bounds) {
+  queuedBounds = bounds;       // keep only the latest
+  scheduleFocusAfterIdle();
+  drainSetPos();
+}
+
+function drainSetPos() {
+  if (inflightSetPos || !queuedBounds || !embeddedHwnd) return;
+
+  const { x, y, width: w, height: h } = queuedBounds;
+  queuedBounds = null;
+  inflightSetPos = true;
+
+  const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+
+  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true, parent: parentHwnd })
+    .catch(err => { appendLog('setpos error: ' + err); })
+    .finally(() => {
+      inflightSetPos = false;
+      forceClickThroughOff();
+      if (queuedBounds) drainSetPos();  // send the next (latest) one
+    });
+}
+
 function scheduleApplyLastBounds() {
   if (resizeTimer) clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
-  }, 200);
-}
-
-function scheduleReembedAfterResize() {
-  if (reembedTimer) clearTimeout(reembedTimer);
-  reembedTimer = setTimeout(() => {
-    reembedTimer = null;
-    if (embeddedHwnd && lastEmbedBounds) {
-      embedChild(embeddedHwnd, lastEmbedBounds);
-    }
   }, 200);
 }
 
@@ -1300,25 +1475,8 @@ $child = [IntPtr]${embeddedHwnd};
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
-  if (pendingSetPos) { setPosAgain = true; return; }
-  const { x, y, width: w, height: h } = clampBounds(lastEmbedBounds);
-  appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
-  pendingSetPos = true;
-  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true })
-    .then(() => {
-      appendLog('applyLastBounds: setpos ok');
-    })
-    .catch(err => {
-      appendLog(`applyLastBounds: setpos fail ${err}`);
-    })
-    .finally(() => {
-      pendingSetPos = false;
-      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2 }).catch(() => {});
-      if (setPosAgain) {
-        setPosAgain = false;
-        applyLastBounds();
-      }
-    });
+  const b = clampBounds(lastEmbedBounds);
+  queueSetPos({ x: b.x, y: b.y, width: b.width, height: b.height });
 }
 
 async function embedChild(childHwnd, bounds) {
@@ -1362,6 +1520,19 @@ $info | ConvertTo-Json -Compress;
     p.on('close', () => {
       try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
       try { win.webContents.send('reembed-loading', false); } catch {}
+      try {
+        workerCall('keepalive', {
+          hwnd: childHwnd,
+          parent: parentHwnd,
+          x: x,
+          y: y,
+          w: w,
+          h: h,
+          px: 2,
+          py: 2,
+          activate: true
+        }).catch(() => {});
+      } catch {}
       resolve(true);
     });
   });
@@ -1389,6 +1560,8 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
   scheduleApplyLastBounds();
+  forceClickThroughOff();
+  scheduleFocusAfterIdle();
 });
 
 ipcMain.handle('restore-embedded', () => {
