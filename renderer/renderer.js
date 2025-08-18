@@ -133,14 +133,16 @@ if (opacityRange) {
   });
 }
 
-window.addEventListener('keypress', e => {
+window.addEventListener('keydown', e => {
   if (!state.hwnd) return;
   const tag = e.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return;
   if (e.key && e.key.length === 1) {
     window.api.forwardKey({ hwnd: state.hwnd, char: e.key.charCodeAt(0) });
-    e.preventDefault();
+  } else {
+    window.api.forwardKey({ hwnd: state.hwnd, vk: e.keyCode });
   }
+  e.preventDefault();
 });
 
 // bindings may be re-initialized if needed by calling bindIpcEvents again

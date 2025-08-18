@@ -304,9 +304,17 @@ function Handle-Drag($req) {
 function Handle-Key($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
-  $ch = [int]$req.char
-  $WM_CHAR = 0x0102
-  [void][U]::PostMessage($hwnd, $WM_CHAR, [IntPtr]$ch, [IntPtr]::Zero)
+  if ($req.char) {
+    $ch = [int]$req.char
+    $WM_CHAR = 0x0102
+    [void][U]::PostMessage($hwnd, $WM_CHAR, [IntPtr]$ch, [IntPtr]::Zero)
+  } elseif ($req.vk) {
+    $vk = [int]$req.vk
+    $WM_KEYDOWN = 0x0100
+    $WM_KEYUP   = 0x0101
+    [void][U]::PostMessage($hwnd, $WM_KEYDOWN, [IntPtr]$vk, [IntPtr]::Zero)
+    [void][U]::PostMessage($hwnd, $WM_KEYUP,   [IntPtr]$vk, [IntPtr]::Zero)
+  }
   @{ id=$req.id; ok=$true }
 }
 
@@ -1258,9 +1266,6 @@ function scheduleReembedAfterResize() {
     if (embeddedHwnd && lastEmbedBounds) {
       await embedChild(embeddedHwnd, lastEmbedBounds);
     }
-    if (win) {
-      try { win.webContents.send('reembed-loading', false); } catch {}
-    }
   }, 200);
 }
 
@@ -1309,6 +1314,7 @@ function applyLastBounds() {
 
 async function embedChild(childHwnd, bounds) {
   if (!win || !childHwnd) return false;
+  try { win.webContents.send('reembed-loading', true); } catch {}
   const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
   const b = clampBounds(bounds || {});
   const x = Math.round(b.x);
@@ -1346,6 +1352,7 @@ $info | ConvertTo-Json -Compress;
     p.stdout.on('data', d => { buf += d.toString(); });
     p.on('close', () => {
       try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
+      try { win.webContents.send('reembed-loading', false); } catch {}
       resolve(true);
     });
   });
