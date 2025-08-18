@@ -267,6 +267,17 @@ function getScaledBounds() {
     x = 0; y = 0;
   }
 
+  // Prevent embedded child from overlapping the app header/controls by enforcing a top inset
+  try {
+    const titlebarEl = document.getElementById('titlebar');
+    const controlsEl = document.getElementById('controls');
+    let inset = 0;
+    if (titlebarEl) inset += titlebarEl.offsetHeight || 0;
+    if (controlsEl && !document.body.classList.contains('compact')) inset += controlsEl.offsetHeight || 0;
+    const insetPx = Math.round(inset * scale) + 2; // small extra padding
+    if (y < insetPx) y = insetPx;
+  } catch (e) { /* ignore */ }
+
   return { x, y, width: Math.max(1, width), height: Math.max(1, height) };
 }
 
@@ -296,6 +307,25 @@ function reportFullscreenState() {
   const b = { x: 0, y: 0, width: Math.round(window.innerWidth * (window.devicePixelRatio || 1)), height: Math.round(window.innerHeight * (window.devicePixelRatio || 1)) };
   try { window.api.reportFullscreen(isFs, b); } catch (e) { /* ignore */ }
 }
+
+function reportTopInset() {
+  try {
+    const titlebarEl = document.getElementById('titlebar');
+    const controlsEl = document.getElementById('controls');
+    let inset = 0;
+    if (titlebarEl) inset += titlebarEl.offsetHeight || 0;
+    if (controlsEl && !document.body.classList.contains('compact')) inset += controlsEl.offsetHeight || 0;
+    window.api.reportTopInset(inset || 0);
+  } catch (e) {}
+}
+
+// report top inset on layout changes
+window.addEventListener('resize', reportTopInset);
+document.addEventListener('DOMContentLoaded', reportTopInset);
+// Also report top inset when compact toggles (controls visibility may change)
+document.addEventListener('click', (e) => {
+  if (e.target && (e.target.id === 'compactBtn' || e.target.closest('#compactBtn'))) setTimeout(reportTopInset, 50);
+});
 
 document.addEventListener('fullscreenchange', () => {
   dbg('fullscreenchange: ' + !!(document.fullscreenElement));

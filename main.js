@@ -1437,6 +1437,7 @@ let embeddedHtmlFullscreen = false;
 let embeddedHtmlFsBounds = null;
 let embeddedMonitorTimer = null;
 let lastEmbeddedCorrection = 0;
+let reportedTopInset = 0;
 let lastAdjustTime = 0;
 const ADJUST_COOLDOWN_MS = 250; // don't adjust more often than this
 const ADJUST_THRESHOLD_PX = 3;   // only apply adjustments larger than this
@@ -1466,9 +1467,10 @@ function clampBounds(b) {
 }
 
 // Apply a small padding inset to the bounds
-function applyPaddingToBounds(b) {
+// Apply a small padding inset to the bounds. padOverride allows passing 0 when maximized/fullscreen.
+function applyPaddingToBounds(b, padOverride) {
   if (!b) return b;
-  const pad = EMBED_PADDING;
+  const pad = typeof padOverride === 'number' ? padOverride : EMBED_PADDING;
   const x = b.x + pad;
   const y = b.y + pad;
   const width = Math.max(1, b.width - pad * 2);
@@ -1494,15 +1496,20 @@ function checkEmbeddedFits() {
       parentArea = win.getContentBounds();
     }
 
-    // Start with lastEmbedBounds, apply padding, and clamp to parent area
-    let b = applyPaddingToBounds(lastEmbedBounds);
+  // Start with lastEmbedBounds, choose padding based on window state (zero when maximized/fullscreen)
+  const isMax = win.isMaximized && win.isMaximized();
+  const isFs = win.isFullScreen && win.isFullScreen();
+  const effectivePad = (isMax || isFs) ? 0 : EMBED_PADDING;
+  let b = applyPaddingToBounds(lastEmbedBounds, effectivePad);
     // Ensure width/height don't exceed parent area
-    if (b.width > parentArea.width - EMBED_PADDING * 2) b.width = Math.max(1, parentArea.width - EMBED_PADDING * 2);
-    if (b.height > parentArea.height - EMBED_PADDING * 2) b.height = Math.max(1, parentArea.height - EMBED_PADDING * 2);
+  if (b.width > parentArea.width - effectivePad * 2) b.width = Math.max(1, parentArea.width - effectivePad * 2);
+  if (b.height > parentArea.height - effectivePad * 2) b.height = Math.max(1, parentArea.height - effectivePad * 2);
 
     // Ensure x/y are within parent area
-    if (b.x < parentArea.x) b.x = parentArea.x + EMBED_PADDING;
-    if (b.y < parentArea.y) b.y = parentArea.y + EMBED_PADDING;
+  if (b.x < parentArea.x) b.x = parentArea.x + EMBED_PADDING;
+  // respect reported top inset (titlebar + controls)
+  const topLimit = (parentArea.y || 0) + (reportedTopInset || 0) + effectivePad;
+  if (b.y < topLimit) b.y = topLimit;
     if (b.x + b.width > parentArea.x + parentArea.width) b.x = Math.max(parentArea.x + EMBED_PADDING, parentArea.x + parentArea.width - b.width - EMBED_PADDING);
     if (b.y + b.height > parentArea.y + parentArea.height) b.y = Math.max(parentArea.y + EMBED_PADDING, parentArea.y + parentArea.height - b.height - EMBED_PADDING);
 
@@ -1510,9 +1517,9 @@ function checkEmbeddedFits() {
     // win.getContentBounds returns x/y in screen coords; we want coordinates relative to content origin
     const contentBounds = win.getContentBounds();
     const relX = b.x - contentBounds.x;
-    const relY = b.y - contentBounds.y;
+  const relY = b.y - contentBounds.y;
 
-    const newBounds = { x: Math.round(relX), y: Math.round(relY), width: Math.round(b.width), height: Math.round(b.height) };
+  const newBounds = { x: Math.round(relX), y: Math.round(relY), width: Math.round(b.width), height: Math.round(b.height) };
     if (!newBounds) return;
     const prev = lastEmbedBounds;
     // compute max delta
@@ -1737,11 +1744,15 @@ function startEmbeddedMonitor() {
       const winRect = geom.win || {};
       const content = win.getContentBounds();
       // If child width/height exceed content bounds (or sits outside), attempt repair
-      if (winRect.w > content.width || winRect.h > content.height || winRect.Left < content.x || winRect.Top < content.y) {
-        appendLog(`Embedded monitor: detected escape/oversize, repairing child hwnd=${embeddedHwnd} win=${JSON.stringify(winRect)} content=${JSON.stringify(content)}`);
-        // clamp to content with padding
-        const clamped = clampBounds({ x: 0, y: 0, width: content.width, height: content.height });
-        const padded = applyPaddingToBounds(clamped);
+      const topLimitScreen = content.y + (reportedTopInset || 0);
+      if (winRect.w > content.width || winRect.h > content.height || winRect.Left < content.x || winRect.Top < topLimitScreen) {
+        appendLog(`Embedded monitor: detected escape/oversize, repairing child hwnd=${embeddedHwnd} win=${JSON.stringify(winRect)} content=${JSON.stringify(content)} topInset=${reportedTopInset}`);
+        // clamp to content with padding and respect top inset
+        const isMax2 = win.isMaximized && win.isMaximized();
+        const isFs2 = win.isFullScreen && win.isFullScreen();
+        const effectivePad2 = (isMax2 || isFs2) ? 0 : EMBED_PADDING;
+        const clamped = clampBounds({ x: 0, y: reportedTopInset || 0, width: content.width, height: content.height - (reportedTopInset || 0) });
+          const padded = applyPaddingToBounds(clamped, effectivePad2);
         lastEmbedBounds = padded;
         scheduleApplyLastBounds();
         lastEmbeddedCorrection = now;
@@ -1875,4 +1886,8 @@ ipcMain.handle('settings:update', (_evt, patch = {}) => {
 ipcMain.handle('force-topmost', () => { 
   try { if (win) win.setAlwaysOnTop(true, 'screen-saver'); } catch {}
   return true; 
+});
+
+ipcMain.on('embedded-top-inset', (_evt, inset) => {
+  try { reportedTopInset = Number(inset) || 0; appendLog(`embedded-top-inset reported ${reportedTopInset}px`); } catch(e){}
 });

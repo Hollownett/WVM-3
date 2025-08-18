@@ -69,4 +69,6 @@ contextBridge.exposeInMainWorld('api', {
   ,
   // report when renderer content goes into/out of HTML5 fullscreen
   reportFullscreen: (flag, bounds) => ipcRenderer.send('embedded-fullscreen', { flag, bounds })
+  ,
+  reportTopInset: (inset) => ipcRenderer.send('embedded-top-inset', inset)
 });
