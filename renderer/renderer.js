@@ -420,6 +420,16 @@ if (fixCaptureBtn) fixCaptureBtn.addEventListener('click', async () => {
   await window.api.ensureCapturable?.({ hwnd: state.hwnd });
 });
 
+// Optional UI toggle: make embedded player click-through to hide controls/tooltips
+const playerClickThrough = document.getElementById('playerClickThrough');
+if (playerClickThrough) {
+  playerClickThrough.addEventListener('change', async (e) => {
+    if (!state.hwnd) return;
+    const op = e.target.checked ? 'clickthroughon' : 'clickthroughoff';
+    try { await window.api.embeddedTweak(state.hwnd, op); } catch (err) { dbg('embeddedTweak failed: ' + err); }
+  });
+}
+
 // ============ Sources & audio ============
 
 async function refreshSources() {

@@ -479,6 +479,41 @@ function Handle-SetPos($req) {
   @{ id=$req.id; ok=$true }
 }
 
+function Handle-Tweak($req) {
+  $hwnd = [IntPtr]([int64]$req.hwnd)
+  if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  $op = ("$($req.op)").ToLowerInvariant()
+  $GWL_EXSTYLE = -20
+  $WS_EX_TRANSPARENT = 0x00000020
+  $WS_EX_LAYERED     = 0x00080000
+  try {
+    $ex = [U2]::GetWindowLong($hwnd, $GWL_EXSTYLE)
+  } catch { $ex = 0 }
+
+  switch ($op) {
+    'clickthroughon' {
+      # add transparent + layered (layered sometimes required for transparent hit-testing)
+      $new = ($ex -bor $WS_EX_TRANSPARENT -bor $WS_EX_LAYERED)
+      [void][U2]::SetWindowLong($hwnd, $GWL_EXSTYLE, $new)
+      @{ id=$req.id; ok=$true }
+    }
+    'clickthroughoff' {
+      $new = $ex -band (-bnot $WS_EX_TRANSPARENT) -band (-bnot $WS_EX_LAYERED)
+      [void][U2]::SetWindowLong($hwnd, $GWL_EXSTYLE, $new)
+      @{ id=$req.id; ok=$true }
+    }
+    'disable' {
+      [void][U]::EnableWindow($hwnd, $false)
+      @{ id=$req.id; ok=$true }
+    }
+    'enable' {
+      [void][U]::EnableWindow($hwnd, $true)
+      @{ id=$req.id; ok=$true }
+    }
+    default { @{ id=$req.id; ok=$false; err='unknown tweak op' } }
+  }
+}
+
 # NEW: Keepalive — restore if minimized, push to bottom, send benign mousemove
 function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
@@ -600,6 +635,7 @@ while ($true) {
       'key'       { Handle-Key $req }
       'setpos'    { Handle-SetPos $req }
       'keepalive' { Handle-KeepAlive $req }   # <— NEW
+  'tweak'     { Handle-Tweak $req }
       default     { @{ id=$req.id; ok=$false; err='unknown op' } }
     }
   } catch {
@@ -1725,6 +1761,8 @@ $info | ConvertTo-Json -Compress;
           py: 2,
           activate: true
         }).catch(() => {});
+  // Make embedded child non-interactive for players like VLC to prevent tooltips and controls
+  try { workerCall('tweak', { hwnd: childHwnd, op: 'clickthroughon' }).catch(() => {}); } catch {}
       } catch {}
       resolve(true);
     });
@@ -1821,6 +1859,18 @@ ipcMain.handle('restore-embedded', () => {
 ipcMain.handle('set-embedded-visible', (_e, flag) => {
   setEmbeddedVisible(!!flag);
   return true;
+});
+
+ipcMain.handle('embedded-tweak', async (_e, { hwnd, op } = {}) => {
+  if (!hwnd) return false;
+  try {
+    const res = await workerCall('tweak', { hwnd, op });
+    appendLog(`embedded-tweak op=${op} hwnd=${hwnd} ok=${!!res.ok}`);
+    return !!res.ok;
+  } catch (e) {
+    appendLog(`embedded-tweak failed op=${op} hwnd=${hwnd} err=${e.message}`);
+    return false;
+  }
 });
 
 // ipcMain.handle('force-topmost', async () => {
