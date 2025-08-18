@@ -39,6 +39,26 @@ let resizeTimer = null;
 let inflightSetPos = false;
 let queuedBounds = null;
 let resizeIdleTimer = null;
+let focusIdleTimer = null;
+
+function scheduleFocusAfterIdle() {
+  clearTimeout(focusIdleTimer);
+  focusIdleTimer = setTimeout(async () => {
+    if (!embeddedHwnd) return;
+    try {
+      if (!win.isFocused()) try { win.focus(); } catch {}
+      await workerCall('keepalive', {
+        hwnd: embeddedHwnd,
+        x: 8,
+        y: 8,
+        activate: true,
+        retries: 3,
+        retryDelayMs: 90,
+        clickOnActivate: true
+      }).catch(() => {});
+    } catch {}
+  }, 140);
+}
 
 // Give the worker a bit more breathing room
 const WORKER_TIMEOUT_MS = 2000;
@@ -110,6 +130,23 @@ public static class U2 {
   [DllImport("user32.dll")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
   [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
   [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+}
+"@
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UF {
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out int pid);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 }
 "@
 
@@ -425,23 +462,40 @@ function Handle-KeepAlive($req) {
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
   if (CoalesceBool $req.activate $false) {
-    $procId = 0
-    $tid = [U]::GetWindowThreadProcessId($hwnd, [ref]$procId)
-    $fg = [U]::GetForegroundWindow()
-    $fgPid = 0
-    $fgTid = [U]::GetWindowThreadProcessId($fg, [ref]$fgPid)
-    $ctid = [U]::GetCurrentThreadId()
-    try {
-      [U]::AttachThreadInput($ctid, $tid, $true)
-      [U]::AttachThreadInput($ctid, $fgTid, $true)
-    } catch {}
-    [void][U]::SetForegroundWindow($hwnd)
-    [void][U]::SetFocus($hwnd)
-    try {
-      [U]::AttachThreadInput($ctid, $fgTid, $false)
-      [U]::AttachThreadInput($ctid, $tid, $false)
-    } catch {}
-    try { [void][U]::EnableWindow($hwnd, $true) } catch {}
+    $retries = if ($req.retries) { [int]$req.retries } else { 1 }
+    $delay   = if ($req.retryDelayMs) { [int]$req.retryDelayMs } else { 60 }
+    for ($i=0; $i -lt $retries; $i++) {
+      try {
+        $GA_ROOT = 2
+        $root = [UF]::GetAncestor($hwnd, $GA_ROOT)
+        $fg   = [UF]::GetForegroundWindow()
+        $out  = 0
+        $fgTid = 0; $myTid = 0
+        $fgTid = [UF]::GetWindowThreadProcessId($fg,   [ref]$out)
+        $out = 0
+        $myTid = [UF]::GetWindowThreadProcessId($root, [ref]$out)
+
+        [void][UF]::AllowSetForegroundWindow(-1) | Out-Null
+        if ($fgTid -ne 0 -and $myTid -ne 0) { [void][UF]::AttachThreadInput($myTid, $fgTid, $true) }
+
+        [void][UF]::BringWindowToTop($root)
+        [void][UF]::SetForegroundWindow($root)
+        [void][UF]::SetActiveWindow($root)
+        [void][UF]::SetFocus($hwnd)
+
+        if ($fgTid -ne 0 -and $myTid -ne 0) { [void][UF]::AttachThreadInput($myTid, $fgTid, $false) }
+
+        if (CoalesceBool $req.clickOnActivate $false) {
+          $x = [int]($req.x); $y = [int]($req.y)
+          $lParam = [IntPtr]((($y -band 0xFFFF) -shl 16) -bor ($x -band 0xFFFF))
+          [void][UF]::SendMessage($hwnd, 0x0201, [IntPtr]1, $lParam)
+          [void][UF]::SendMessage($hwnd, 0x0202, [IntPtr]0, $lParam)
+        }
+        break
+      } catch {
+        Start-Sleep -Milliseconds $delay
+      }
+    }
   }
   @{ id=$req.id; ok=$true }
 }
@@ -1286,6 +1340,7 @@ function clampBounds(b) {
 
 function queueSetPos(bounds) {
   queuedBounds = bounds;       // keep only the latest
+  scheduleFocusAfterIdle();
   drainSetPos();
 }
 
@@ -1421,6 +1476,7 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
   scheduleApplyLastBounds();
+  scheduleFocusAfterIdle();
 });
 
 ipcMain.handle('restore-embedded', () => {
