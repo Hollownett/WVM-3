@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('api', {
   embedWindow: (hwnd, bounds) => ipcRenderer.invoke('embed-window', { hwnd, bounds }),
   setEmbeddedBounds: (b) => ipcRenderer.send('embed-window-bounds', b),
   restoreEmbeddedWindow: () => ipcRenderer.invoke('restore-embedded'),
+  setEmbeddedVisible: (v) => ipcRenderer.invoke('set-embedded-visible', v),
 
   // debug log
   logAppend: (line) => ipcRenderer.invoke('log:append', line),

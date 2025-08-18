@@ -65,6 +65,9 @@ function setLoading(show, message) {
   if (!loading) return;
   loading.textContent = message || 'Loading...';
   loading.style.display = show ? 'flex' : 'none';
+  if (window.api?.setEmbeddedVisible) {
+    window.api.setEmbeddedVisible(!show).catch(() => {});
+  }
 }
 
 function bindIpcEvents() {

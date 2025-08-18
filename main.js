@@ -338,8 +338,8 @@ function Handle-SetPos($req) {
     } catch {}
   }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
-  $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
+  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
+  $flags = ($SWP_NOZORDER -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
   $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -1259,7 +1259,10 @@ function scheduleApplyLastBounds() {
 function scheduleReembedAfterResize() {
   if (reembedTimer) clearTimeout(reembedTimer);
   if (embeddedHwnd && lastEmbedBounds && win) {
-    try { win.webContents.send('reembed-loading', true); } catch {}
+    try {
+      setEmbeddedVisible(false);
+      win.webContents.send('reembed-loading', true);
+    } catch {}
   }
   reembedTimer = setTimeout(async () => {
     reembedTimer = null;
@@ -1287,6 +1290,18 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
     keepAliveTimers.delete(embeddedHwnd);
   }
   embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
+}
+
+function setEmbeddedVisible(show) {
+  if (!embeddedHwnd) return;
+  const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+[U]::ShowWindow($child, ${show ? 5 : 0}) | Out-Null;
+`;
+  try {
+    spawnSync('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
+  } catch {}
 }
 
 function applyLastBounds() {
@@ -1338,8 +1353,8 @@ $s = $s -bor $WS_CHILD;
 $ex = $origEx -band (-bnot $WS_EX_TOPMOST);
 [U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
 $oldParent = [U]::SetParent($child, $parent);
-  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
-  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
+  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020;
+  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_FRAMECHANGED) | Out-Null;
 $info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx; x = $wr.Left; y = $wr.Top; w = ($wr.Right - $wr.Left); h = ($wr.Bottom - $wr.Top) };
 $info | ConvertTo-Json -Compress;
 `;
@@ -1384,6 +1399,11 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
 
 ipcMain.handle('restore-embedded', () => {
   restoreEmbeddedWindow();
+  return true;
+});
+
+ipcMain.handle('set-embedded-visible', (_e, flag) => {
+  setEmbeddedVisible(!!flag);
   return true;
 });
 
