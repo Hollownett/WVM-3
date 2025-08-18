@@ -669,6 +669,7 @@ function createWindow () {
   // Child window adjustments are applied after renderer reports final bounds
   // Debounce during window moves to avoid snapping while resizing
   win.on('move', scheduleApplyLastBounds);
+  win.on('resize', scheduleReembedAfterResize);
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
@@ -1200,6 +1201,7 @@ let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
 let pendingSetPos = false;
 let setPosAgain = false;
+let reembedTimer = null;
 
 function clampBounds(b) {
   if (!win) return { x: b?.x ?? 0, y: b?.y ?? 0, width: b?.width ?? 0, height: b?.height ?? 0 };
@@ -1216,6 +1218,16 @@ function scheduleApplyLastBounds() {
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
+  }, 200);
+}
+
+function scheduleReembedAfterResize() {
+  if (reembedTimer) clearTimeout(reembedTimer);
+  reembedTimer = setTimeout(() => {
+    reembedTimer = null;
+    if (embeddedHwnd && lastEmbedBounds) {
+      embedChild(embeddedHwnd, lastEmbedBounds);
+    }
   }, 200);
 }
 
