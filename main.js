@@ -40,6 +40,28 @@ let inflightSetPos = false;
 let queuedBounds = null;
 let focusIdleTimer = null;
 
+// periodic keepalive to contain fullscreen escapes
+const KEEPALIVE_INTERVAL_MS = 3000;
+let keepAliveTicker = null;
+
+function startKeepAliveTicker() {
+  if (keepAliveTicker) return;
+  keepAliveTicker = setInterval(() => {
+    if (!embeddedHwnd || !lastEmbedBounds) return;
+    const b = clampBounds(lastEmbedBounds);
+    const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
+    workerCall('keepalive', {
+      hwnd: embeddedHwnd,
+      parent: parentHwnd,
+      x: b.x,
+      y: b.y,
+      w: b.width,
+      h: b.height,
+      activate: false
+    }).catch(() => {});
+  }, KEEPALIVE_INTERVAL_MS);
+}
+
 function forceClickThroughOff() {
   try { win.setIgnoreMouseEvents(false); } catch {}
 }
@@ -63,12 +85,19 @@ function scheduleFocusAfterIdle() {
     bumpHostToFront();
 
     // 3) focus parent then embedded child
+    const b = clampBounds(lastEmbedBounds);
+    const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
     if (!win.isFocused()) { try { win.focus(); } catch {} }
     try {
       await workerCall('keepalive', {
         hwnd: embeddedHwnd,
-        x: 8,
-        y: 8,
+        parent: parentHwnd,
+        x: b.x,
+        y: b.y,
+        w: b.width,
+        h: b.height,
+        px: 8,
+        py: 8,
         activate: true,
         retries: 3,
         retryDelayMs: 90,
@@ -449,19 +478,35 @@ function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
   if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
   if ($req.parent) {
-    $p = [IntPtr]([int64]$req.parent)
     try {
+      $p = [IntPtr]([int64]$req.parent)
       $cur = [U2]::GetAncestor($hwnd, 1)
       if ($cur -ne $p) { [void][U2]::SetParent($hwnd, $p) }
       $GWL_STYLE = -16
+      $GWL_EXSTYLE = -20
       $WS_CHILD = 0x40000000
       $WS_POPUP = 0x80000000
+      $WS_EX_TOPMOST = 0x00000008
       $style = [U2]::GetWindowLong($hwnd, $GWL_STYLE)
-      if (($style -band $WS_CHILD) -eq 0 -or ($style -band $WS_POPUP) -ne 0) {
-        $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
-        [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
-      }
+      $ex    = [U]::GetWindowLong($hwnd, $GWL_EXSTYLE)
+      $style = ($style -bor $WS_CHILD) -band (-bnot $WS_POPUP)
+      $ex    = $ex -band (-bnot $WS_EX_TOPMOST)
+      [void][U2]::SetWindowLong($hwnd, $GWL_STYLE, $style)
+      [void][U]::SetWindowLong($hwnd, $GWL_EXSTYLE, $ex)
     } catch {}
+  }
+
+  if ($req.x -ne $null -and $req.y -ne $null -and $req.w -ne $null -and $req.h -ne $null) {
+    $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
+    $SWP_NOACTIVATE      = 0x0010
+    $SWP_FRAMECHANGED    = 0x0020
+    $SWP_NOSENDCHANGING  = 0x0400
+    $SWP_ASYNCWINDOWPOS  = 0x4000
+    $flags = $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED -bor $SWP_NOSENDCHANGING -bor $SWP_ASYNCWINDOWPOS
+    $HWND_TOP = [IntPtr]0
+    [void][U]::SetWindowPos($hwnd, $HWND_TOP, $x, $y, $w, $h, $flags)
+    $SWP_NOMOVE = 0x0002; $SWP_NOSIZE = 0x0001
+    [void][U]::SetWindowPos($hwnd, $HWND_TOP, 0, 0, 0, 0, ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_NOACTIVATE))
   }
 
   # only restore if minimized; never steal focus
@@ -479,8 +524,8 @@ function Handle-KeepAlive($req) {
   }
 
   # gentle mousemove ping (keeps media alive)
-  $cx = CoalesceInt $req.x 2
-  $cy = CoalesceInt $req.y 2
+  $cx = CoalesceInt $req.px 2
+  $cy = CoalesceInt $req.py 2
   $info = Resolve-ChildPoint -hwnd $hwnd -cx $cx -cy $cy
   $WM_MOUSEMOVE = 0x0200
   [void][U]::PostMessage($info.child, $WM_MOUSEMOVE, [IntPtr]::Zero, [IntPtr]([int]$info.lParam))
@@ -509,7 +554,7 @@ function Handle-KeepAlive($req) {
         if ($fgTid -ne 0 -and $myTid -ne 0) { [void][UF]::AttachThreadInput($myTid, $fgTid, $false) }
 
         if (CoalesceBool $req.clickOnActivate $false) {
-          $x = [int]($req.x); $y = [int]($req.y)
+          $x = [int](CoalesceInt $req.px 2); $y = [int](CoalesceInt $req.py 2)
           $lParam = [IntPtr]((($y -band 0xFFFF) -shl 16) -bor ($x -band 0xFFFF))
           [void][UF]::SendMessage($hwnd, 0x0201, [IntPtr]1, $lParam)
           [void][UF]::SendMessage($hwnd, 0x0202, [IntPtr]0, $lParam)
@@ -841,6 +886,7 @@ app.whenReady().then(() => {
   loadSettings();
   createWindow();
   registerHotkeys();
+  startKeepAliveTicker();
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
@@ -861,8 +907,15 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
   if (enable) {
     const ms = Math.max(1000, Number(periodMs) || 4000);
     const tick = () => {
-      const payload = { hwnd, x: x ?? 2, y: y ?? 2 };
-      if (hwnd === embeddedHwnd && hostHwnd) payload.parent = hostHwnd;
+      const payload = { hwnd, px: x ?? 2, py: y ?? 2 };
+      if (hwnd === embeddedHwnd && hostHwnd && lastEmbedBounds) {
+        const b = clampBounds(lastEmbedBounds);
+        payload.parent = hostHwnd;
+        payload.x = b.x;
+        payload.y = b.y;
+        payload.w = b.width;
+        payload.h = b.height;
+      }
       workerCall('keepalive', payload)
         .then(() => {
           if (hwnd === embeddedHwnd) scheduleApplyLastBounds();
@@ -1466,7 +1519,19 @@ $info | ConvertTo-Json -Compress;
     p.on('close', () => {
       try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
       try { win.webContents.send('reembed-loading', false); } catch {}
-      try { workerCall('keepalive', { hwnd: childHwnd, x: 2, y: 2, activate: true }).catch(() => {}); } catch {}
+      try {
+        workerCall('keepalive', {
+          hwnd: childHwnd,
+          parent: parentHwnd,
+          x: x,
+          y: y,
+          w: w,
+          h: h,
+          px: 2,
+          py: 2,
+          activate: true
+        }).catch(() => {});
+      } catch {}
       resolve(true);
     });
   });

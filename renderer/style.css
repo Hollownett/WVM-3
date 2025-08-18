@@ -70,3 +70,24 @@ button:hover { filter:brightness(1.06); }
   font-size:20px;
   backdrop-filter:blur(2px);
 }
+
+/* Ensure embedded viewport is fully interactive */
+#viewport, .viewport, #embed, .embed {
+  -webkit-app-region: no-drag !important;
+  pointer-events: auto !important;
+  position: relative;
+  z-index: 1;
+}
+
+/* Overlays should never swallow clicks */
+#overlay, .overlay, #loading, .loading {
+  pointer-events: none !important;
+}
+
+/* Restrict drag regions to explicit header elements */
+.header, .titlebar {
+  -webkit-app-region: drag;
+}
+.header *, .titlebar * {
+  -webkit-app-region: no-drag;
+}

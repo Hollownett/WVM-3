@@ -58,6 +58,8 @@ if (dbgCopyBtn)  dbgCopyBtn.onclick  = async () => {
   alert('Debug log copied');
 };
 
+if (viewport) viewport.style['-webkit-app-region'] = 'no-drag';
+
 let offDebugLog, offClickThroughUpdated, offToggleCompact, offReembed;
 
 let boundsPumpOn = false;
