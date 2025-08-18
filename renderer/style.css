@@ -55,3 +55,18 @@ button:hover { filter:brightness(1.06); }
 .debug { padding: 0 12px 12px; }
 #debugLog { background:#0c0c10; border:1px solid var(--border); padding:10px; border-radius:10px; max-height:220px; overflow:auto; }
 .dbg-tools { display:flex; gap:8px; margin:6px 0; }
+
+#loading {
+  position:fixed;
+  top:0;
+  left:0;
+  right:0;
+  bottom:0;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  background:rgba(0,0,0,0.5);
+  z-index:999;
+  font-size:20px;
+  backdrop-filter:blur(2px);
+}

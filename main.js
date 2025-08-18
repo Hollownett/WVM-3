@@ -301,6 +301,23 @@ function Handle-Drag($req) {
   @{ id=$req.id; ok=$true }
 }
 
+function Handle-Key($req) {
+  $hwnd = [IntPtr]([int64]$req.hwnd)
+  if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  if ($req.char) {
+    $ch = [int]$req.char
+    $WM_CHAR = 0x0102
+    [void][U]::PostMessage($hwnd, $WM_CHAR, [IntPtr]$ch, [IntPtr]::Zero)
+  } elseif ($req.vk) {
+    $vk = [int]$req.vk
+    $WM_KEYDOWN = 0x0100
+    $WM_KEYUP   = 0x0101
+    [void][U]::PostMessage($hwnd, $WM_KEYDOWN, [IntPtr]$vk, [IntPtr]::Zero)
+    [void][U]::PostMessage($hwnd, $WM_KEYUP,   [IntPtr]$vk, [IntPtr]::Zero)
+  }
+  @{ id=$req.id; ok=$true }
+}
+
 # Resize/move embedded child window and refocus
 function Handle-SetPos($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
@@ -321,8 +338,8 @@ function Handle-SetPos($req) {
     } catch {}
   }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
-  $flags = ($SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
+  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
+  $flags = ($SWP_NOZORDER -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
   $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -425,6 +442,7 @@ while ($true) {
       'dblclick'  { Handle-DblClick $req }
       'wheel'     { Handle-Wheel $req }
       'drag'      { Handle-Drag $req }
+      'key'       { Handle-Key $req }
       'setpos'    { Handle-SetPos $req }
       'keepalive' { Handle-KeepAlive $req }   # <— NEW
       default     { @{ id=$req.id; ok=$false; err='unknown op' } }
@@ -669,6 +687,7 @@ function createWindow () {
   // Child window adjustments are applied after renderer reports final bounds
   // Debounce during window moves to avoid snapping while resizing
   win.on('move', scheduleApplyLastBounds);
+  win.on('resize', scheduleReembedAfterResize);
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
@@ -736,7 +755,11 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
     const tick = () => {
       const payload = { hwnd, x: x ?? 2, y: y ?? 2 };
       if (hwnd === embeddedHwnd && hostHwnd) payload.parent = hostHwnd;
-      workerCall('keepalive', payload).catch(() => {});
+      workerCall('keepalive', payload)
+        .then(() => {
+          if (hwnd === embeddedHwnd) scheduleApplyLastBounds();
+        })
+        .catch(() => {});
     };
     keepAliveTimers.set(hwnd, setInterval(tick, ms));
     tick(); // immediate
@@ -859,6 +882,7 @@ ipcMain.handle('list-audio-devices', async () => {
 
   const tmpJson = path.join(os.tmpdir(), `svv_${Date.now()}.json`);
   let devices = [];
+  let defaultId = null;
   try {
     const jsonArgs = [
       '/Columns','Name,Command-Line Friendly ID,Item Type,Type,Direction,Device State,Device ID,Device Name',
@@ -871,17 +895,21 @@ ipcMain.handle('list-audio-devices', async () => {
       dbg(`JSON head: ${rawText.slice(0, 120).replace(/\n/g,'\\n')}`);
       const arr = JSON.parse(rawText || '[]');
 
-      devices = (Array.isArray(arr) ? arr : [arr]).map(x => ({
+      const parsed = (Array.isArray(arr) ? arr : [arr]).map(x => ({
         name: x.Name || x['Device Name'] || x['Device Friendly Name'] || 'Unknown device',
         id:   x['Command-Line Friendly ID'] || x['Command Line Friendly ID'] || x['Device ID'] || '',
         type: (x['Item Type'] || x.Type || '').toString().toLowerCase(),
         dir:  (x.Direction || '').toString().toLowerCase(),
         state:(x['Device State'] || '').toString().toLowerCase(),
-      }))
-      .filter(d => d.type.includes('device'))
-      .filter(d => d.dir.includes('render') || d.dir.includes('playback') || d.dir.includes('output'))
-      .filter(d => !d.state || d.state.includes('active'))
-      .map(d => ({ name: d.name, id: d.id }));
+        isDefault: !!(x.Default || x['Default Playback'] || x['Default'] || x['Default Device'])
+      }));
+
+      devices = parsed
+        .filter(d => d.type.includes('device'))
+        .filter(d => d.dir.includes('render') || d.dir.includes('playback') || d.dir.includes('output'))
+        .filter(d => !d.state || d.state.includes('active'))
+        .map(d => ({ name: d.name, id: d.id, isDefault: d.isDefault }));
+      defaultId = devices.find(d => d.isDefault)?.id || null;
       dbg(`JSON parsed devices: ${devices.length}`);
     }
   } catch (e) {
@@ -913,7 +941,7 @@ ipcMain.handle('list-audio-devices', async () => {
           dir:  cols.findIndex(c => /^Direction$/i.test(c)),
           state:cols.findIndex(c => /^Device State$/i.test(c)),
         };
-        devices = lines.map(ln => {
+        const parsed = lines.map(ln => {
           const p = ln.split('\t');
           return {
             name: p[idx.name] || 'Unknown device',
@@ -922,11 +950,12 @@ ipcMain.handle('list-audio-devices', async () => {
             dir:  (p[idx.dir] || '').toLowerCase(),
             state:(p[idx.state] || '').toLowerCase(),
           };
-        })
-        .filter(d => d.type.includes('device'))
-        .filter(d => d.dir.includes('render') || d.dir.includes('playback') || d.dir.includes('output'))
-        .filter(d => !d.state || d.state.includes('active'))
-        .map(d => ({ name: d.name, id: d.id }));
+        });
+        devices = parsed
+          .filter(d => d.type.includes('device'))
+          .filter(d => d.dir.includes('render') || d.dir.includes('playback') || d.dir.includes('output'))
+          .filter(d => !d.state || d.state.includes('active'))
+          .map(d => ({ name: d.name, id: d.id }));
         dbg(`TSV parsed devices: ${devices.length}`);
       }
     } catch (e) {
@@ -940,7 +969,8 @@ ipcMain.handle('list-audio-devices', async () => {
     dbg('No devices found after JSON+TSV');
     return { error: 'No playback devices found. Try running SoundVolumeView manually.' };
   }
-  return { devices };
+  if (!defaultId && devices.length) defaultId = devices[0].id;
+  return { devices: devices.map(({ name, id }) => ({ name, id })), defaultId };
 });
 
 ipcMain.handle('route-audio', async (_evt, { pid, deviceId }) => {
@@ -949,6 +979,10 @@ ipcMain.handle('route-audio', async (_evt, { pid, deviceId }) => {
   return new Promise((resolve) => {
     const args = ['/SetAppDefault', deviceId, 'all', String(pid)];
     const p = spawn(svv, args, { windowsHide: true });
+    p.on('error', err => {
+      dbg(`route-audio spawn error: ${err.message}`);
+      resolve({ ok: false, error: err.message });
+    });
     p.on('close', code => {
       if (code === 0) routedAudioPid = pid;
       resolve({ ok: code === 0, code });
@@ -983,6 +1017,15 @@ ipcMain.handle('get-window-geometry', async (_evt, hwnd) => {
 ipcMain.handle('forward-click-sendinput', async (_evt, { hwnd, x, y }) => {
   try {
     const r = await workerCall('sendinput', { hwnd, x, y }, 1200);
+    return { ok: !!r.ok };
+  } catch (e) {
+    return { ok:false, error: e.err || String(e) };
+  }
+});
+
+ipcMain.handle('forward-key', async (_evt, payload) => {
+  try {
+    const r = await workerCall('key', payload, 1200);
     return { ok: !!r.ok };
   } catch (e) {
     return { ok:false, error: e.err || String(e) };
@@ -1193,6 +1236,41 @@ let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
 let pendingSetPos = false;
 let setPosAgain = false;
+let reembedTimer = null;
+
+function clampBounds(b) {
+  if (!win) return { x: b?.x ?? 0, y: b?.y ?? 0, width: b?.width ?? 0, height: b?.height ?? 0 };
+  const parent = win.getContentBounds();
+  const width  = Math.min(Math.max(0, b?.width  ?? 0), parent.width);
+  const height = Math.min(Math.max(0, b?.height ?? 0), parent.height);
+  const x = Math.min(Math.max(0, b?.x ?? 0), parent.width  - width);
+  const y = Math.min(Math.max(0, b?.y ?? 0), parent.height - height);
+  return { x, y, width, height };
+}
+
+function scheduleApplyLastBounds() {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
+    applyLastBounds();
+  }, 200);
+}
+
+function scheduleReembedAfterResize() {
+  if (reembedTimer) clearTimeout(reembedTimer);
+  if (embeddedHwnd && lastEmbedBounds && win) {
+    try {
+      setEmbeddedVisible(false);
+      win.webContents.send('reembed-loading', true);
+    } catch {}
+  }
+  reembedTimer = setTimeout(async () => {
+    reembedTimer = null;
+    if (embeddedHwnd && lastEmbedBounds) {
+      await embedChild(embeddedHwnd, lastEmbedBounds);
+    }
+  }, 200);
+}
 
 function restoreEmbeddedWindow() {
   if (!embeddedHwnd || !embeddedInfo) return;
@@ -1214,10 +1292,22 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
   embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
 }
 
+function setEmbeddedVisible(show) {
+  if (!embeddedHwnd) return;
+  const ps = `
+Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\n}\n"@;
+$child = [IntPtr]${embeddedHwnd};
+[U]::ShowWindow($child, ${show ? 5 : 0}) | Out-Null;
+`;
+  try {
+    spawnSync('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-Command', ps], { windowsHide: true });
+  } catch {}
+}
+
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
   if (pendingSetPos) { setPosAgain = true; return; }
-  const { x, y, width: w, height: h } = lastEmbedBounds;
+  const { x, y, width: w, height: h } = clampBounds(lastEmbedBounds);
   appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
   pendingSetPos = true;
   workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true })
@@ -1239,11 +1329,13 @@ function applyLastBounds() {
 
 async function embedChild(childHwnd, bounds) {
   if (!win || !childHwnd) return false;
+  try { win.webContents.send('reembed-loading', true); } catch {}
   const parentHwnd = win.getNativeWindowHandle().readInt32LE(0);
-  const x = Math.round(bounds?.x ?? 0);
-  const y = Math.round(bounds?.y ?? 0);
-  const w = Math.round(bounds?.width ?? 0);
-  const h = Math.round(bounds?.height ?? 0);
+  const b = clampBounds(bounds || {});
+  const x = Math.round(b.x);
+  const y = Math.round(b.y);
+  const w = Math.round(b.width);
+  const h = Math.round(b.height);
   appendLog(`embed-window hwnd=${childHwnd} parent=${parentHwnd} x=${x} y=${y} w=${w} h=${h}`);
   const ps = `
 Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic struct RECT { public int Left, Top, Right, Bottom; }\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n  [DllImport(\"user32.dll\")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);\n}\n"@;
@@ -1261,8 +1353,8 @@ $s = $s -bor $WS_CHILD;
 $ex = $origEx -band (-bnot $WS_EX_TOPMOST);
 [U]::SetWindowLong($child, $GWL_EXSTYLE, $ex) | Out-Null;
 $oldParent = [U]::SetParent($child, $parent);
-  $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
-  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_SHOWWINDOW -bor $SWP_FRAMECHANGED) | Out-Null;
+  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020;
+  [U]::SetWindowPos($child, [IntPtr]0, ${x}, ${y}, ${w}, ${h}, $SWP_NOZORDER -bor $SWP_FRAMECHANGED) | Out-Null;
 $info = @{ parent = [int64]$oldParent; style = $origStyle; ex = $origEx; x = $wr.Left; y = $wr.Top; w = ($wr.Right - $wr.Left); h = ($wr.Bottom - $wr.Top) };
 $info | ConvertTo-Json -Compress;
 `;
@@ -1275,6 +1367,7 @@ $info | ConvertTo-Json -Compress;
     p.stdout.on('data', d => { buf += d.toString(); });
     p.on('close', () => {
       try { embeddedInfo = JSON.parse(buf.trim()); } catch { embeddedInfo = null; }
+      try { win.webContents.send('reembed-loading', false); } catch {}
       resolve(true);
     });
   });
@@ -1282,19 +1375,36 @@ $info | ConvertTo-Json -Compress;
 
 ipcMain.handle('embed-window', async (_evt, payload) => {
   const { hwnd: childHwnd, bounds } = payload || {};
-  if (embeddedHwnd) restoreEmbeddedWindow();
+  if (!childHwnd) return false;
+  if (embeddedHwnd && embeddedHwnd !== childHwnd) restoreEmbeddedWindow();
+  if (embeddedHwnd === childHwnd) {
+    lastEmbedBounds = clampBounds(bounds || lastEmbedBounds);
+    scheduleApplyLastBounds();
+    return true;
+  }
   return embedChild(childHwnd, bounds);
 });
 
 ipcMain.on('embed-window-bounds', (_evt, b) => {
   if (!embeddedHwnd) return;
-  const x = Math.round(b?.x ?? 0);
-  const y = Math.round(b?.y ?? 0);
-  const width = Math.round(b?.width ?? 0);
-  const height = Math.round(b?.height ?? 0);
+  const c = clampBounds(b || {});
+  const x = Math.round(c.x);
+  const y = Math.round(c.y);
+  const width = Math.round(c.width);
+  const height = Math.round(c.height);
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
   scheduleApplyLastBounds();
+});
+
+ipcMain.handle('restore-embedded', () => {
+  restoreEmbeddedWindow();
+  return true;
+});
+
+ipcMain.handle('set-embedded-visible', (_e, flag) => {
+  setEmbeddedVisible(!!flag);
+  return true;
 });
 
 // ipcMain.handle('force-topmost', async () => {
