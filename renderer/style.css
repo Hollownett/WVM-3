@@ -75,7 +75,6 @@ button:hover { filter:brightness(1.06); }
 #viewport, .viewport, #embed, .embed {
   -webkit-app-region: no-drag !important;
   pointer-events: auto !important;
-  position: relative;
   z-index: 1;
 }
 
