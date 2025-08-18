@@ -64,7 +64,7 @@ let offDebugLog, offClickThroughUpdated, offToggleCompact;
 function setLoading(show, message) {
   if (!loading) return;
   loading.textContent = message || 'Loading...';
-  loading.hidden = !show;
+  loading.style.display = show ? 'flex' : 'none';
 }
 
 function bindIpcEvents() {
