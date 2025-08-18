@@ -22,6 +22,7 @@ const embedBtn      = document.getElementById('embed');
 const routeBtn      = document.getElementById('route');
 const fixCaptureBtn = document.getElementById('fixCapture');
 const compactBtn    = document.getElementById('compactBtn');
+const loading       = document.getElementById('loading');
 
 
 // debug (kept but non-intrusive)
@@ -59,6 +60,12 @@ if (dbgCopyBtn)  dbgCopyBtn.onclick  = async () => {
 };
 
 let offDebugLog, offClickThroughUpdated, offToggleCompact;
+
+function setLoading(show, message) {
+  if (!loading) return;
+  loading.textContent = message || 'Loading...';
+  loading.hidden = !show;
+}
 
 function bindIpcEvents() {
   // remove old listeners if re-binding
@@ -197,6 +204,8 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
   await window.api.setOpacity(1);
   if (opacityRange) opacityRange.value = '1';
   if (opacityVal) opacityVal.textContent = '100%';
+  setLoading(true, 'Embedding window…');
+  try {
     const bounds = getScaledBounds();
     await window.api.embedWindow(hwnd, bounds);
     await window.api.keepAliveSet({ hwnd, enable: true });
@@ -211,14 +220,22 @@ if (embedBtn) embedBtn.addEventListener('click', async () => {
     }
     window.addEventListener('resize', queueEmbedBounds);
     attemptAutoRoute();
+  } finally {
+    setLoading(false);
+  }
 });
 
 if (sourceSelect) sourceSelect.addEventListener('change', async () => {
   const title = sourceSelect.options[sourceSelect.selectedIndex]?.text || '';
   state.windowTitle = title;
-  const list = await window.api.findPidsByTitle(title);
-  fillPidSelect(list);
-  attemptAutoRoute();
+  setLoading(true, 'Searching processes…');
+  try {
+    const list = await window.api.findPidsByTitle(title);
+    fillPidSelect(list);
+    attemptAutoRoute();
+  } finally {
+    setLoading(false);
+  }
 });
 
 if (routeBtn) routeBtn.addEventListener('click', () => attemptAutoRoute());
@@ -234,51 +251,61 @@ if (fixCaptureBtn) fixCaptureBtn.addEventListener('click', async () => {
 // ============ Sources & audio ============
 
 async function refreshSources() {
-  sourceSelect.innerHTML = '';
-  const sources = await window.api.listCaptureSources();
-  for (const s of sources) {
-    const opt = document.createElement('option');
-    opt.value = s.id;
-    opt.textContent = s.name;
-    sourceSelect.appendChild(opt);
-  }
-  if (!sources.length) {
-    const opt = document.createElement('option');
-    opt.textContent = 'No windows found';
-    sourceSelect.appendChild(opt);
-  } else {
-    // Force user interaction so the first click triggers a change event
-    sourceSelect.selectedIndex = -1;
+  setLoading(true, 'Loading windows…');
+  try {
+    sourceSelect.innerHTML = '';
+    const sources = await window.api.listCaptureSources();
+    for (const s of sources) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = s.name;
+      sourceSelect.appendChild(opt);
+    }
+    if (!sources.length) {
+      const opt = document.createElement('option');
+      opt.textContent = 'No windows found';
+      sourceSelect.appendChild(opt);
+    } else {
+      // Force user interaction so the first click triggers a change event
+      sourceSelect.selectedIndex = -1;
+    }
+  } finally {
+    setLoading(false);
   }
 }
 
 async function refreshAudioDevices() {
-  dbg('Refreshing audio devices…');
-  const res = await window.api.listAudioDevices();
-  deviceSelect.innerHTML = '';
-  if (res.error) {
-    dbg(`Error: ${res.error}`);
-    const opt = document.createElement('option');
-    opt.textContent = res.error;
-    deviceSelect.appendChild(opt);
-    debugArea && (debugArea.open = true);
-    return;
+  setLoading(true, 'Loading audio devices…');
+  try {
+    dbg('Refreshing audio devices…');
+    const res = await window.api.listAudioDevices();
+    deviceSelect.innerHTML = '';
+    if (res.error) {
+      dbg(`Error: ${res.error}`);
+      const opt = document.createElement('option');
+      opt.textContent = res.error;
+      deviceSelect.appendChild(opt);
+      debugArea && (debugArea.open = true);
+      return;
+    }
+    dbg(`Devices loaded: ${res.devices.length}`);
+    for (const d of res.devices) {
+      if (!d.id) continue;
+      const opt = document.createElement('option');
+      opt.value = d.id;
+      opt.textContent = d.name;
+      deviceSelect.appendChild(opt);
+    }
+    if (deviceSelect.options.length) {
+      const idx = res.devices.findIndex(d => d.id === res.defaultId);
+      deviceSelect.selectedIndex = idx >= 0 ? idx : 0;
+      state.audioDeviceId = deviceSelect.value;
+    }
+    // if we already have a PID, try route
+    attemptAutoRoute();
+  } finally {
+    setLoading(false);
   }
-  dbg(`Devices loaded: ${res.devices.length}`);
-  for (const d of res.devices) {
-    if (!d.id) continue;
-    const opt = document.createElement('option');
-    opt.value = d.id;
-    opt.textContent = d.name;
-    deviceSelect.appendChild(opt);
-  }
-  if (deviceSelect.options.length) {
-    const idx = res.devices.findIndex(d => d.id === res.defaultId);
-    deviceSelect.selectedIndex = idx >= 0 ? idx : 0;
-    state.audioDeviceId = deviceSelect.value;
-  }
-  // if we already have a PID, try route
-  attemptAutoRoute();
 }
 
 function fillPidSelect(list) {
@@ -303,9 +330,14 @@ async function attemptAutoRoute() {
   const pid = pidSelect.value;
   const deviceId = deviceSelect.value;
   if (!pid || !deviceId) return;
-  const res = await window.api.routeAudio({ pid, deviceId });
-  if (!res?.ok) dbg(`Audio route failed (pid=${pid})`);
-  else dbg(`Audio routed pid=${pid}`);
+  setLoading(true, 'Routing audio…');
+  try {
+    const res = await window.api.routeAudio({ pid, deviceId });
+    if (!res?.ok) dbg(`Audio route failed (pid=${pid})`);
+    else dbg(`Audio routed pid=${pid}`);
+  } finally {
+    setLoading(false);
+  }
 }
 
 // ============ Profiles (localStorage, lightweight) ============
