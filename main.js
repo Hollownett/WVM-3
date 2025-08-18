@@ -88,6 +88,17 @@ public static class U {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool  AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   }
+"@ 
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class U2 {
+  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+  [DllImport("user32.dll")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+}
 "@
 
 [void][U]::SetProcessDPIAware()
@@ -338,8 +349,12 @@ function Handle-SetPos($req) {
     } catch {}
   }
   $x = [int]$req.x; $y = [int]$req.y; $w = [int]$req.w; $h = [int]$req.h
-  $SWP_NOZORDER = 0x0004; $SWP_FRAMECHANGED = 0x0020; $SWP_NOACTIVATE = 0x0010
-  $flags = ($SWP_NOZORDER -bor $SWP_FRAMECHANGED -bor $SWP_NOACTIVATE)
+  $SWP_NOZORDER        = 0x0004
+  $SWP_NOACTIVATE      = 0x0010
+  $SWP_FRAMECHANGED    = 0x0020
+  $SWP_NOSENDCHANGING  = 0x0400
+  $SWP_ASYNCWINDOWPOS  = 0x4000
+  $flags = ($SWP_NOZORDER -bor $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED -bor $SWP_NOSENDCHANGING -bor $SWP_ASYNCWINDOWPOS)
   $ok = [U]::SetWindowPos($hwnd, [IntPtr]0, $x, $y, $w, $h, $flags)
   if (-not $ok) {
     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -687,7 +702,7 @@ function createWindow () {
   // Child window adjustments are applied after renderer reports final bounds
   // Debounce during window moves to avoid snapping while resizing
   win.on('move', scheduleApplyLastBounds);
-  win.on('resize', scheduleReembedAfterResize);
+  win.on('resize', scheduleApplyLastBounds);
   win.on('minimize', () => applyLastBounds());
   win.on('restore', () => applyLastBounds());
   win.on('maximize', () => applyLastBounds());
@@ -1236,7 +1251,6 @@ let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
 let pendingSetPos = false;
 let setPosAgain = false;
-let reembedTimer = null;
 
 function clampBounds(b) {
   if (!win) return { x: b?.x ?? 0, y: b?.y ?? 0, width: b?.width ?? 0, height: b?.height ?? 0 };
@@ -1253,16 +1267,6 @@ function scheduleApplyLastBounds() {
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     applyLastBounds();
-  }, 200);
-}
-
-function scheduleReembedAfterResize() {
-  if (reembedTimer) clearTimeout(reembedTimer);
-  reembedTimer = setTimeout(() => {
-    reembedTimer = null;
-    if (embeddedHwnd && lastEmbedBounds) {
-      embedChild(embeddedHwnd, lastEmbedBounds);
-    }
   }, 200);
 }
 
@@ -1304,7 +1308,10 @@ function applyLastBounds() {
   const { x, y, width: w, height: h } = clampBounds(lastEmbedBounds);
   appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
   pendingSetPos = true;
-  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true })
+  workerCall('setpos', {
+    hwnd: embeddedHwnd, x, y, w, h, keepAlive: true,
+    parent: hostHwnd   // re-assert parenting if the app tries to detach
+  })
     .then(() => {
       appendLog('applyLastBounds: setpos ok');
     })

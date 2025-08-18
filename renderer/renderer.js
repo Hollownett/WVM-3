@@ -61,6 +61,50 @@ if (dbgCopyBtn)  dbgCopyBtn.onclick  = async () => {
 
 let offDebugLog, offClickThroughUpdated, offToggleCompact, offReembed;
 
+let boundsPumpOn = false;
+let boundsPumpRaf = 0;
+let lastSent = null;
+let idleStopTimer = 0;
+
+function almostEqual(a, b) {
+  return Math.abs(a - b) <= 1; // 1px tolerance at device pixels
+}
+
+function sendBoundsIfChanged() {
+  if (!viewport || !state.hwnd) return;
+  const b = getScaledBounds();
+  if (
+    !lastSent ||
+    !almostEqual(b.x, lastSent.x) ||
+    !almostEqual(b.y, lastSent.y) ||
+    !almostEqual(b.width, lastSent.width) ||
+    !almostEqual(b.height, lastSent.height)
+  ) {
+    window.api.setEmbeddedBounds(b);
+    lastSent = b;
+  }
+}
+
+function pumpBounds() {
+  if (!boundsPumpOn) return;
+  sendBoundsIfChanged();
+  boundsPumpRaf = requestAnimationFrame(pumpBounds);
+}
+
+function startBoundsPump() {
+  if (boundsPumpOn) return;
+  boundsPumpOn = true;
+  pumpBounds();
+}
+
+function stopBoundsPumpSoon() {
+  clearTimeout(idleStopTimer);
+  idleStopTimer = setTimeout(() => {
+    boundsPumpOn = false;
+    cancelAnimationFrame(boundsPumpRaf);
+  }, 120); // stop shortly after user stops resizing
+}
+
 function setLoading(show, message) {
   if (!loading) return;
   loading.textContent = message || 'Loading...';
@@ -190,7 +234,6 @@ if (locateSVVBtn) locateSVVBtn.addEventListener('click', async () => {
 
 let embedObserver = null;
 let stageObserver = null;
-let resizeTimer = null;
 
 function getScaledBounds() {
   const r = viewport.getBoundingClientRect();
@@ -209,11 +252,9 @@ function sendEmbedBounds() {
 }
 
 function queueEmbedBounds() {
-  if (resizeTimer) clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    resizeTimer = null;
-    sendEmbedBounds();
-  }, 200);
+  // kick the high-frequency pump and schedule a short stop when idle
+  startBoundsPump();
+  stopBoundsPumpSoon();
 }
 
 if (embedBtn) embedBtn.addEventListener('click', async () => {
