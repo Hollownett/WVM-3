@@ -1191,18 +1191,10 @@ list.ForEach(s => Console.WriteLine(s));
 let embeddedHwnd = null;
 let embeddedInfo = null; // original parent & styles
 let lastEmbedBounds = null;
-let hostHwnd = null;
-
-function restoreAudioRoute() {
-  if (!routedAudioPid) return;
-  const svv = getSVVPath();
-  if (!svv) { routedAudioPid = null; return; }
-  try { spawnSync(svv, ['/SetAppDefault', 'Default', 'all', String(routedAudioPid)], { windowsHide: true }); } catch {}
-  routedAudioPid = null;
-}
+let pendingSetPos = false;
+let setPosAgain = false;
 
 function restoreEmbeddedWindow() {
-  restoreAudioRoute();
   if (!embeddedHwnd || !embeddedInfo) return;
   const ps = `
 Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic static class U {\n  [DllImport(\"user32.dll\")] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);\n  [DllImport(\"user32.dll\")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);\n  [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);\n}\n"@;
@@ -1219,26 +1211,30 @@ $SWP_NOZORDER = 0x0004; $SWP_SHOWWINDOW = 0x0040; $SWP_FRAMECHANGED = 0x0020;
     clearInterval(keepAliveTimers.get(embeddedHwnd));
     keepAliveTimers.delete(embeddedHwnd);
   }
-  embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null; hostHwnd = null;
+  embeddedHwnd = null; embeddedInfo = null; lastEmbedBounds = null;
 }
 
 function applyLastBounds() {
   if (!embeddedHwnd || !lastEmbedBounds) return;
-  const child = embeddedHwnd;
-  const bounds = lastEmbedBounds;
-  restoreEmbeddedWindow();
-  embedChild(child, bounds).catch(err => {
-    appendLog(`re-embed fail ${err}`);
-  });
-}
-
-function scheduleApplyLastBounds() {
-  if (resizeTimer) clearTimeout(resizeTimer);
-  // Debounce re-embedding so live parent resizes are not interrupted
-  resizeTimer = setTimeout(() => {
-    resizeTimer = null;
-    applyLastBounds();
-  }, 200);
+  if (pendingSetPos) { setPosAgain = true; return; }
+  const { x, y, width: w, height: h } = lastEmbedBounds;
+  appendLog(`applyLastBounds hwnd=${embeddedHwnd} x=${x} y=${y} w=${w} h=${h}`);
+  pendingSetPos = true;
+  workerCall('setpos', { hwnd: embeddedHwnd, x, y, w, h, keepAlive: true })
+    .then(() => {
+      appendLog('applyLastBounds: setpos ok');
+    })
+    .catch(err => {
+      appendLog(`applyLastBounds: setpos fail ${err}`);
+    })
+    .finally(() => {
+      pendingSetPos = false;
+      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2 }).catch(() => {});
+      if (setPosAgain) {
+        setPosAgain = false;
+        applyLastBounds();
+      }
+    });
 }
 
 async function embedChild(childHwnd, bounds) {
