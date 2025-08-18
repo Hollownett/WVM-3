@@ -111,7 +111,12 @@ function unbindIpcEvents() {
 }
 
 bindIpcEvents();
-window.addEventListener('beforeunload', unbindIpcEvents);
+window.addEventListener('beforeunload', () => {
+  if (state.pid) {
+    try { window.api.routeAudio({ pid: state.pid, deviceId: 'Default' }); } catch {}
+  }
+  unbindIpcEvents();
+});
 
 // tiny pointer shadow to visualize mapping
 
