@@ -38,15 +38,33 @@ let resizeTimer = null;
 // --- setpos coalescing + resize idle ---
 let inflightSetPos = false;
 let queuedBounds = null;
-let resizeIdleTimer = null;
 let focusIdleTimer = null;
+
+function forceClickThroughOff() {
+  try { win.setIgnoreMouseEvents(false); } catch {}
+}
+
+function bumpHostToFront() {
+  try {
+    win.setAlwaysOnTop(true, 'screen-saver');
+    setTimeout(() => { try { win.setAlwaysOnTop(false); } catch {} }, 30);
+  } catch {}
+}
 
 function scheduleFocusAfterIdle() {
   clearTimeout(focusIdleTimer);
   focusIdleTimer = setTimeout(async () => {
     if (!embeddedHwnd) return;
+
+    // 1) ensure BrowserWindow isn't click-through
+    forceClickThroughOff();
+
+    // 2) bump parent z-order briefly
+    bumpHostToFront();
+
+    // 3) focus parent then embedded child
+    if (!win.isFocused()) { try { win.focus(); } catch {} }
     try {
-      if (!win.isFocused()) try { win.focus(); } catch {}
       await workerCall('keepalive', {
         hwnd: embeddedHwnd,
         x: 8,
@@ -774,12 +792,6 @@ function createWindow () {
   // Debounce during window moves to avoid snapping while resizing
   win.on('resize', () => {
     scheduleApplyLastBounds();
-    clearTimeout(resizeIdleTimer);
-    resizeIdleTimer = setTimeout(() => {
-      if (!embeddedHwnd) return;
-      workerCall('keepalive', { hwnd: embeddedHwnd, x: 2, y: 2, activate: true })
-        .catch(() => {});
-    }, 140); // run once when the user stops dragging
   });
 
   win.on('move', () => {
@@ -799,11 +811,10 @@ function createWindow () {
 function registerHotkeys() {
   globalShortcut.unregisterAll();
   globalShortcut.register('Control+Shift+I', () => {
-    const flag = !(settings.clickThrough ?? false);
-    if (win) win.setIgnoreMouseEvents(flag, { forward: true });
-    settings.clickThrough = flag;
+    forceClickThroughOff();
+    settings.clickThrough = false;
     saveSettings();
-    if (win) win.webContents.send('clickthrough-updated', flag);
+    if (win) win.webContents.send('clickthrough-updated', false);
   });
 }
 
@@ -904,9 +915,10 @@ ipcMain.handle('set-opacity', (_e, value) => {
   const v = Math.max(0.3, Math.min(1, Number(value) || 1));
   win.setOpacity(v); settings.opacity = v; saveSettings(); return v;
 });
-ipcMain.handle('set-click-through', (_e, flag) => {
-  win.setIgnoreMouseEvents(!!flag, { forward: true });
-  settings.clickThrough = !!flag; saveSettings(); return !!flag;
+ipcMain.handle('set-click-through', () => {
+  forceClickThroughOff();
+  settings.clickThrough = false; saveSettings();
+  return false;
 });
 ipcMain.handle('toggle-compact', () => { win.webContents.send('toggle-compact'); });
 
@@ -1362,6 +1374,7 @@ function drainSetPos() {
     .catch(err => { appendLog('setpos error: ' + err); })
     .finally(() => {
       inflightSetPos = false;
+      forceClickThroughOff();
       if (queuedBounds) drainSetPos();  // send the next (latest) one
     });
 }
@@ -1481,6 +1494,7 @@ ipcMain.on('embed-window-bounds', (_evt, b) => {
   lastEmbedBounds = { x, y, width, height };
   appendLog(`embed-window-bounds x=${x} y=${y} w=${width} h=${height}`);
   scheduleApplyLastBounds();
+  forceClickThroughOff();
   scheduleFocusAfterIdle();
 });
 
