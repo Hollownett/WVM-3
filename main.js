@@ -737,7 +737,11 @@ ipcMain.handle('keepalive:set', async (_evt, { hwnd, enable, x, y, periodMs }) =
     const tick = () => {
       const payload = { hwnd, x: x ?? 2, y: y ?? 2 };
       if (hwnd === embeddedHwnd && hostHwnd) payload.parent = hostHwnd;
-      workerCall('keepalive', payload).catch(() => {});
+      workerCall('keepalive', payload)
+        .then(() => {
+          if (hwnd === embeddedHwnd) scheduleApplyLastBounds();
+        })
+        .catch(() => {});
     };
     keepAliveTimers.set(hwnd, setInterval(tick, ms));
     tick(); // immediate
