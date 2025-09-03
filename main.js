@@ -514,6 +514,23 @@ function Handle-Tweak($req) {
   }
 }
 
+function Handle-PidInfo($req) {
+  $hwnd = [IntPtr]([int64]$req.hwnd)
+  if (-not [U]::IsWindow($hwnd)) { return @{ id=$req.id; ok=$false; err='bad hwnd' } }
+  $out = 0
+  try {
+    [U]::GetWindowThreadProcessId($hwnd, [ref]$out) | Out-Null
+  } catch { $out = 0 }
+  $pid = [int]$out
+  $procName = ''
+  $path = ''
+  try {
+    $p = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if ($p) { $procName = $p.ProcessName; try { $path = $p.Path } catch { $path = '' } }
+  } catch {}
+  @{ id=$req.id; ok=$true; pid=$pid; processName=$procName; path=$path }
+}
+
 # NEW: Keepalive — restore if minimized, push to bottom, send benign mousemove
 function Handle-KeepAlive($req) {
   $hwnd = [IntPtr]([int64]$req.hwnd)
@@ -636,6 +653,7 @@ while ($true) {
       'setpos'    { Handle-SetPos $req }
       'keepalive' { Handle-KeepAlive $req }   # <— NEW
   'tweak'     { Handle-Tweak $req }
+  'pidinfo'   { Handle-PidInfo $req }
       default     { @{ id=$req.id; ok=$false; err='unknown op' } }
     }
   } catch {
@@ -1761,8 +1779,50 @@ $info | ConvertTo-Json -Compress;
           py: 2,
           activate: true
         }).catch(() => {});
-  // Make embedded child non-interactive for players like VLC to prevent tooltips and controls
-  try { workerCall('tweak', { hwnd: childHwnd, op: 'clickthroughon' }).catch(() => {}); } catch {}
+      // Try to detect process; only auto-enable click-through for known media players
+      try {
+        (async () => {
+          try {
+            const info = await workerCall('pidinfo', { hwnd: childHwnd }).catch(() => null);
+            const name = (info && info.processName || '').toLowerCase();
+            const path = (info && info.path || '').toLowerCase();
+            const players = ['vlc', 'mpv', 'potplayer', 'mpc', 'mpvnet'];
+            const isPlayer = players.some(p => name.includes(p) || path.includes(p));
+            if (isPlayer) {
+              workerCall('tweak', { hwnd: childHwnd, op: 'clickthroughon' }).catch(() => {});
+              appendLog(`Auto click-through enabled for embedded player pid=${info.pid} name=${info.processName}`);
+            } else {
+              appendLog(`Auto click-through skipped for embedded process pid=${info && info.pid} name=${info && info.processName}`);
+              // Ensure the embedded window is interactive: clear click-through and enable input
+              try { workerCall('tweak', { hwnd: childHwnd, op: 'clickthroughoff' }).catch(() => {}); } catch {}
+              try { workerCall('tweak', { hwnd: childHwnd, op: 'enable' }).catch(() => {}); } catch {}
+              // Give the child a chance to receive keyboard: explicitly activate/focus it
+              try {
+                (async () => {
+                  // small delay to let style changes settle
+                  await new Promise(r => setTimeout(r, 80));
+                  await workerCall('keepalive', {
+                    hwnd: childHwnd,
+                    parent: parentHwnd,
+                    x: x, y: y, w: w, h: h,
+                    activate: true,
+                    clickOnActivate: false,
+                    retries: 4,
+                    retryDelayMs: 80
+                  }).catch(() => {});
+                  // After activation, simulate a small click near the top of the child window
+                  try {
+                    // pick a point near the top (inside title/address area)
+                    const cx = Math.max(8, Math.min(120, Math.floor(w / 4)));
+                    const cy = 12;
+                    await workerCall('smart', { hwnd: childHwnd, x: cx, y: cy }).catch(() => {});
+                  } catch {}
+                })();
+              } catch {}
+            }
+          } catch (e) {}
+        })();
+      } catch {}
       } catch {}
       resolve(true);
     });
